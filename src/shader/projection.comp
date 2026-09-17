@@ -169,7 +169,7 @@ void main() {
   // direction in model space for SH calculation
   vec4 camera_podel_position = inverse(model) * vec4(camera_position, 1.f);
   camera_podel_position = camera_podel_position / camera_podel_position.w;
-  vec3 dir = normalize(pos.xyz - camera_podel_position.xyz);
+  vec3 dir = normalize(camera_podel_position.xyz - pos.xyz);
 
   // model matrix
   mat3 model3d = mat3(model);
