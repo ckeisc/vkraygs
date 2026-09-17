@@ -41,9 +41,13 @@ int main(int argc, char** argv) {
   argparse::ArgumentParser parser("vkgs");
   parser.add_argument("-i", "--input").help("input ply/spz file.");
   parser.add_argument("--z-up")
+      .default_value(true)
+      .implicit_value(true)
+      .help("Z-up world for the orbit camera (default: true; Hyperscape SPZ captures are Z-up).");
+  parser.add_argument("--y-up")
       .default_value(false)
       .implicit_value(true)
-      .help("Z-up world for the orbit camera (e.g. Hyperscape SPZ captures); default is Y-up.");
+      .help("Y-up world for the orbit camera (for standard Y-up files).");
   parser.add_argument("--kernel")
       .default_value(std::string("raygs"))
       .help("splat kernel for batch mode: gs (EWA) or raygs");
@@ -79,7 +83,10 @@ int main(int argc, char** argv) {
   try {
     vkgs::Engine engine;
 
-    if (parser.get<bool>("z-up")) {
+    // Z-up is the default (Hyperscape SPZ captures are Z-up).
+    // --y-up opts back into Y-up orbit camera for standard files.
+    bool z_up = parser.get<bool>("z-up") && !parser.get<bool>("y-up");
+    if (z_up) {
       engine.SetZUp(true);
     }
 
