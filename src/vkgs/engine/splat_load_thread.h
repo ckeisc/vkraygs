@@ -41,9 +41,6 @@ class SplatLoadThread {
   // Debug: ignore SH view-dependent terms, use DC color only.
   void SetDcOnly(bool dc_only);
 
-  // Logit-space opacity bias applied at load time (Hyperscape compatibility).
-  void SetOpacityBias(float bias);
-
   Progress GetProgress();
 
   void Cancel();

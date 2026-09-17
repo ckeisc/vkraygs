@@ -657,7 +657,8 @@ class Engine::Impl {
   }
 
   void SetOpacityBias(float bias) {
-    splat_load_thread_.SetOpacityBias(bias);
+    opacity_bias_ = bias;
+    opacity_bias_dirty_ = true;
   }
 
   // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
@@ -1086,6 +1087,16 @@ class Engine::Impl {
           camera_.Translate(0.f, speed * dt);
         }
 
+        // Hyperscape compatibility: PageUp/PageDown adjust opacity bias by ±0.5.
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
+          SetOpacityBias(opacity_bias_ + 0.5f);
+          std::cout << "opacity bias: " << opacity_bias_ << std::endl;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
+          SetOpacityBias(opacity_bias_ - 0.5f);
+          std::cout << "opacity bias: " << opacity_bias_ << std::endl;
+        }
+
         if (ImGui::IsKeyDown(ImGuiKey::ImGuiMod_Alt) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
           ToggleDisplayMode();
         }
@@ -1480,6 +1491,10 @@ class Engine::Impl {
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 3, 1, &descriptor, 0,
                                 NULL);
 
+        // Push opacity bias (Hyperscape compatibility, PageUp/PageDown adjustable).
+        vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(float), &opacity_bias_);
+
         constexpr int local_size = 256;
         vkCmdDispatch(cb, (loaded_point_count_ + local_size - 1) / local_size, 1, 1);
 
@@ -1491,6 +1506,34 @@ class Engine::Impl {
 
         // hold buffer until the end of frame
         frame_info.ply_buffer = progress.ply_buffer;
+      }
+
+      // Re-run parse_ply if opacity bias changed via PageUp/PageDown.
+      // Descriptors already point to the loaded PLY data; just push new bias and dispatch.
+      if (opacity_bias_dirty_ && loaded_point_count_ > 0) {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, parse_ply_pipeline_);
+
+        VkDescriptorSet descriptor = descriptors_[frame_index].gaussian;
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 1, 1, &descriptor, 0,
+                                NULL);
+
+        descriptor = descriptors_[frame_index].ply;
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 3, 1, &descriptor, 0,
+                                NULL);
+
+        vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(float), &opacity_bias_);
+
+        constexpr int local_size = 256;
+        vkCmdDispatch(cb, (loaded_point_count_ + local_size - 1) / local_size, 1, 1);
+
+        VkMemoryBarrier bias_barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        bias_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        bias_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &bias_barrier, 0, NULL, 0, NULL);
+
+        opacity_bias_dirty_ = false;
       }
 
       if (loaded_point_count_ != 0) {
@@ -2107,6 +2150,10 @@ class Engine::Impl {
   // batch (headless) rendering state
   bool batch_mode_ = false;
   bool batch_raygs_ = true;
+
+  // Hyperscape compatibility: GPU-side logit opacity bias (PageUp/PageDown adjustable).
+  float opacity_bias_ = 0.0f;
+  bool opacity_bias_dirty_ = false;
   std::vector<std::array<float, 16>> batch_views_;
   std::vector<std::array<float, 3>> batch_eyes_;
   std::string batch_out_dir_ = ".";

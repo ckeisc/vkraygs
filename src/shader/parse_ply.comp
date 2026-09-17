@@ -35,6 +35,11 @@ layout(std430, set = 3, binding = 0) readonly buffer GaussianPly {
 
 float sigmoid(float x) { return 1.f / (1.f + exp(-x)); }
 
+// Hyperscape compatibility: logit-space opacity bias for real-time tuning.
+layout(push_constant, std430) uniform ParsePushConstants {
+  float opacity_bias;
+};
+
 shared uint local_offsets[60];
 
 void main() {
@@ -74,6 +79,6 @@ void main() {
       gaussian_sh[48 * id + i] = float16_t(ply[base * id + local_offsets[10 + i]]);
     }
 
-    gaussian_opacity[id] = sigmoid(ply[base * id + local_offsets[58]]);
+    gaussian_opacity[id] = sigmoid(ply[base * id + local_offsets[58]] + opacity_bias);
   }
 }
