@@ -1260,17 +1260,28 @@ class Engine::Impl {
           ImGui::RadioButton("RayGS", &model_type, 1);
         }
 
+        ModelType new_model_type = model_type_;
         switch (model_type) {
           case 0:
-            model_type_ = ModelType::GS;
+            new_model_type = ModelType::GS;
             break;
 
           case 1:
-            model_type_ = ModelType::RayGS;
+            new_model_type = ModelType::RayGS;
             break;
 
           default:
             break;
+        }
+        // If kernel changed, force a full state reset. The projection output
+        // format differs between GS and RayGS; stale buffers cause corrupted
+        // rendering (green streaks) until the camera moves forces a rebuild.
+        if (new_model_type != model_type_) {
+          model_type_ = new_model_type;
+          // Mark opacity bias dirty to force parse_ply re-dispatch, which
+          // rebuilds the gaussian buffers from the persistent PLY source.
+          // This ensures the projection input is in the correct format.
+          opacity_bias_dirty_ = true;
         }
 
         ImGui::SliderFloat("MIP bias", &splat_push_constants_.mip_bias, 0.0f, 1.0f);
@@ -2028,6 +2039,10 @@ class Engine::Impl {
   VkFormat depth_format_ = VK_FORMAT_D32_SFLOAT;
   SplatRenderMode splat_render_mode_ = SplatRenderMode::TriangleList;
   ModelType model_type_ = ModelType::RayGS;
+  // Track model type changes to force pipeline state reset. Switching kernels
+  // (GS<->RayGS) can leave stale GPU state (e.g., projection output format
+  // mismatch) causing corrupted rendering until the camera moves.
+  ModelType prev_model_type_ = ModelType::RayGS;
   SplatPushConstants splat_push_constants_;
 
   // Dynamic GPU visibility culling (Hyperscape cluster masks + centroids).
