@@ -80,6 +80,10 @@ int main(int argc, char** argv) {
       .default_value(0.0f)
       .scan<'g', float>()
       .help("logit-space opacity boost for Hyperscape SPZ (e.g. 1.0); compensates for rasterizer vs ray-marcher accumulation");
+  parser.add_argument("--no-visibility-cull")
+      .default_value(false)
+      .implicit_value(true)
+      .help("disable Hyperscape visibility-cluster culling (for testing if culling causes holes)");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -172,6 +176,12 @@ int main(int argc, char** argv) {
     if (opacity_bias != 0.0f) {
       engine.SetOpacityBias(opacity_bias);
       std::cout << "opacity bias: " << opacity_bias << " (logit space)" << std::endl;
+    }
+
+    const bool no_visibility_cull = parser.get<bool>("no-visibility-cull");
+    if (no_visibility_cull) {
+      engine.SetDisableVisibilityCull(true);
+      std::cout << "visibility-cluster culling disabled" << std::endl;
     }
 
     if (parser.is_used("input")) {

@@ -669,6 +669,10 @@ class Engine::Impl {
     opacity_bias_dirty_ = true;
   }
 
+  void SetDisableVisibilityCull(bool disable) {
+    disable_visibility_cull_ = disable;
+  }
+
   // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
   static bool LoadCullCentroids(const std::string& path, std::vector<glm::vec3>* out) {
     std::ifstream f(path);
@@ -784,9 +788,14 @@ class Engine::Impl {
     vkFreeCommandBuffers(context_.device(), context_.command_pool(), 1, &cb);
 
     splat_push_constants_.cull_words_per_mask = cull_words_per_mask_;
-    splat_push_constants_.cull_mode = 1;
+    // cull_mode: 0 = off, 1 = dynamic. Disabled via --no-visibility-cull flag.
+    splat_push_constants_.cull_mode = disable_visibility_cull_ ? 0 : 1;
     cull_dynamic_ready_ = true;
-    fprintf(stderr, "[cull] dynamic GPU culling ready\n");
+    if (disable_visibility_cull_) {
+      fprintf(stderr, "[cull] visibility-cluster culling disabled by flag\n");
+    } else {
+      fprintf(stderr, "[cull] dynamic GPU culling ready\n");
+    }
   }
 
   // Find the 3 nearest centroid indices to the given eye position.
@@ -2209,6 +2218,8 @@ class Engine::Impl {
   // Hyperscape compatibility: GPU-side logit opacity bias (PageUp/PageDown adjustable).
   float opacity_bias_ = 0.0f;
   bool opacity_bias_dirty_ = false;
+  // Disable Hyperscape visibility-cluster culling (for testing).
+  bool disable_visibility_cull_ = false;
   // Persistent PLY source buffer for opacity-bias re-dispatch. The per-frame
   // FrameInfo::ply_buffer is only held until end of the load frame; we need
   // the source data alive for the lifetime of the scene to re-run parse_ply.
