@@ -2275,6 +2275,10 @@ void Engine::SetOpacityBias(float bias) {
   impl_->SetOpacityBias(bias);
 }
 
+void Engine::SetDisableVisibilityCull(bool disable) {
+  impl_->SetDisableVisibilityCull(disable);
+}
+
 void Engine::Run() { impl_->Run(); }
 
 void Engine::Close() { impl_->Close(); }
