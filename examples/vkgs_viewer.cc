@@ -65,9 +65,13 @@ int main(int argc, char** argv) {
       .scan<'g', float>()
       .help("logit-space opacity boost (e.g. 1.0) to reduce background bleed-through");
   parser.add_argument("--dc-only")
+      .default_value(true)
+      .implicit_value(true)
+      .help("ignore SH view-dependent terms, use DC color only (default: true; Hyperscape SPZ uses non-standard SH convention)");
+  parser.add_argument("--full-sh")
       .default_value(false)
       .implicit_value(true)
-      .help("ignore SH view-dependent terms, use DC color only (debug)");
+      .help("enable full SH evaluation (for standard 3DGS SPZ files)");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -115,9 +119,12 @@ int main(int argc, char** argv) {
       std::cout << "opacity bias: " << opacity_bias << std::endl;
     }
 
-    if (parser.get<bool>("dc-only")) {
+    // DC-only is the default (Hyperscape SPZ uses non-standard SH convention).
+    // --full-sh opts back into standard 3DGS SH evaluation.
+    bool dc_only = parser.get<bool>("dc-only") && !parser.get<bool>("full-sh");
+    if (dc_only) {
       engine.SetDcOnly(true);
-      std::cout << "dc-only: ignoring SH view-dependent terms" << std::endl;
+      std::cout << "dc-only: ignoring SH view-dependent terms (Hyperscape mode)" << std::endl;
     }
 
     if (parser.is_used("input")) {
