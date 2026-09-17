@@ -40,6 +40,10 @@ bool LoadViewsFile(const std::string& path, std::vector<std::array<float, 16>>* 
 int main(int argc, char** argv) {
   argparse::ArgumentParser parser("vkgs");
   parser.add_argument("-i", "--input").help("input ply/spz file.");
+  parser.add_argument("--z-up")
+      .default_value(false)
+      .implicit_value(true)
+      .help("Z-up world for the orbit camera (e.g. Hyperscape SPZ captures); default is Y-up.");
   parser.add_argument("--kernel")
       .default_value(std::string("raygs"))
       .help("splat kernel for batch mode: gs (EWA) or raygs");
@@ -59,6 +63,10 @@ int main(int argc, char** argv) {
 
   try {
     vkgs::Engine engine;
+
+    if (parser.get<bool>("z-up")) {
+      engine.SetZUp(true);
+    }
 
     const std::string views_path = parser.get<std::string>("views");
     if (!views_path.empty()) {

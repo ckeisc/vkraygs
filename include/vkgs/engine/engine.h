@@ -18,6 +18,9 @@ class Engine {
   void LoadSplats(const std::string& ply_filepath);
   void LoadSplatsAsync(const std::string& ply_filepath);
 
+  // World up-axis for the interactive orbit camera (default Y-up).
+  void SetZUp(bool z_up);
+
   // Batch (headless) rendering: render each pose to a PNG and return.
   // Views are column-major 4x4 view matrices; eyes are camera positions.
   void SetKernelRayGS(bool raygs);

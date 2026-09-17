@@ -1927,6 +1927,8 @@ void Engine::LoadSplats(const std::string& ply_filepath) { impl_->LoadSplats(ply
 
 void Engine::LoadSplatsAsync(const std::string& ply_filepath) { impl_->LoadSplatsAsync(ply_filepath); }
 
+void Engine::SetZUp(bool z_up) { impl_->camera_.SetZUp(z_up); }
+
 void Engine::SetKernelRayGS(bool raygs) { impl_->SetKernelRayGS(raygs); }
 
 void Engine::SetBatchViews(const std::vector<std::array<float, 16>>& views,

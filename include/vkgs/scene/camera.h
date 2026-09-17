@@ -38,7 +38,12 @@ class Camera {
   void Zoom(float x);
   void DollyZoom(float scroll);
 
+  // World up-axis convention for the orbit camera. Default is Y-up;
+  // set to true for Z-up data (e.g. Hyperscape SPZ captures).
+  void SetZUp(bool z_up) { z_up_ = z_up; }
+
  private:
+  bool z_up_ = false;
   uint32_t width_ = 256;
   uint32_t height_ = 256;
   float fovy_ = glm::radians(60.f);
