@@ -36,6 +36,9 @@ class Engine {
   // Positive values boost opacity to reduce background bleed-through.
   void SetOpacityBias(float bias);
 
+  // Debug: ignore SH view-dependent terms, use DC only.
+  void SetDcOnly(bool dc_only);
+
   void Run();
 
   void Close();

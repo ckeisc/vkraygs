@@ -64,6 +64,10 @@ int main(int argc, char** argv) {
       .default_value(0.0f)
       .scan<'g', float>()
       .help("logit-space opacity boost (e.g. 1.0) to reduce background bleed-through");
+  parser.add_argument("--dc-only")
+      .default_value(false)
+      .implicit_value(true)
+      .help("ignore SH view-dependent terms, use DC color only (debug)");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -109,6 +113,11 @@ int main(int argc, char** argv) {
     if (opacity_bias != 0.0f) {
       engine.SetOpacityBias(opacity_bias);
       std::cout << "opacity bias: " << opacity_bias << std::endl;
+    }
+
+    if (parser.get<bool>("dc-only")) {
+      engine.SetDcOnly(true);
+      std::cout << "dc-only: ignoring SH view-dependent terms" << std::endl;
     }
 
     if (parser.is_used("input")) {

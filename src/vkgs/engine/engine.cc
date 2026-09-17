@@ -636,6 +636,10 @@ class Engine::Impl {
     splat_load_thread_.SetOpacityBias(bias);
   }
 
+  void SetDcOnly(bool dc_only) {
+    splat_load_thread_.SetDcOnly(dc_only);
+  }
+
   void LoadSplatsAsync(const std::string& ply_filepath) {
     std::unique_lock<std::mutex> guard{mutex_};
     pending_ply_filepath_ = ply_filepath;
@@ -1956,6 +1960,10 @@ void Engine::SetCullMasks(const std::string& masks_path, int view_index) {
 
 void Engine::SetOpacityBias(float bias) {
   impl_->SetOpacityBias(bias);
+}
+
+void Engine::SetDcOnly(bool dc_only) {
+  impl_->SetDcOnly(dc_only);
 }
 
 void Engine::Run() { impl_->Run(); }

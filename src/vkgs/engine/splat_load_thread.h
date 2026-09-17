@@ -41,6 +41,8 @@ class SplatLoadThread {
   // Logit-space opacity bias applied at load time.
   void SetOpacityBias(float bias);
 
+  void SetDcOnly(bool dc_only);
+
   Progress GetProgress();
 
   void Cancel();
