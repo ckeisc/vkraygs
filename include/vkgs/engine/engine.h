@@ -32,6 +32,10 @@ class Engine {
   // masks_path: per-splat uint64 visibility bitmasks; view_index: 0-63 viewpoint.
   void SetCullMasks(const std::string& masks_path, int view_index);
 
+  // Logit-space opacity bias (added to SPZ alpha logits before sigmoid).
+  // Positive values boost opacity to reduce background bleed-through.
+  void SetOpacityBias(float bias);
+
   void Run();
 
   void Close();

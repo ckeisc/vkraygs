@@ -38,6 +38,9 @@ class SplatLoadThread {
   // view_index selects the viewpoint bit (0-63). Empty path disables.
   void SetCullMasks(const std::string& masks_path, int view_index);
 
+  // Logit-space opacity bias applied at load time.
+  void SetOpacityBias(float bias);
+
   Progress GetProgress();
 
   void Cancel();

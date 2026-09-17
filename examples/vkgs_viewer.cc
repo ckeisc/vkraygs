@@ -60,6 +60,10 @@ int main(int argc, char** argv) {
       .default_value(-1)
       .scan<'i', int>()
       .help("viewpoint index (0-63) for --cull-masks; nearest to camera");
+  parser.add_argument("--opacity-bias")
+      .default_value(0.0f)
+      .scan<'g', float>()
+      .help("logit-space opacity boost (e.g. 1.0) to reduce background bleed-through");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -99,6 +103,12 @@ int main(int argc, char** argv) {
     if (!cull_masks.empty() && cull_view >= 0) {
       engine.SetCullMasks(cull_masks, cull_view);
       std::cout << "culling: masks=" << cull_masks << " view=" << cull_view << std::endl;
+    }
+
+    const float opacity_bias = parser.get<float>("opacity-bias");
+    if (opacity_bias != 0.0f) {
+      engine.SetOpacityBias(opacity_bias);
+      std::cout << "opacity bias: " << opacity_bias << std::endl;
     }
 
     if (parser.is_used("input")) {
