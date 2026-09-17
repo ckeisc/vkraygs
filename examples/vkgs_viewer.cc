@@ -76,6 +76,10 @@ int main(int argc, char** argv) {
       .default_value(false)
       .implicit_value(true)
       .help("enable full SH evaluation (for standard 3DGS SPZ files)");
+  parser.add_argument("--opacity-bias")
+      .default_value(0.0f)
+      .scan<'g', float>()
+      .help("logit-space opacity boost for Hyperscape SPZ (e.g. 1.0); compensates for rasterizer vs ray-marcher accumulation");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -133,6 +137,12 @@ int main(int argc, char** argv) {
     if (dc_only) {
       engine.SetDcOnly(true);
       std::cout << "dc-only: ignoring SH view-dependent terms (Hyperscape mode)" << std::endl;
+    }
+
+    const float opacity_bias = parser.get<float>("opacity-bias");
+    if (opacity_bias != 0.0f) {
+      engine.SetOpacityBias(opacity_bias);
+      std::cout << "opacity bias: " << opacity_bias << " (logit space)" << std::endl;
     }
 
     if (parser.is_used("input")) {

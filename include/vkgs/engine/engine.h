@@ -42,6 +42,10 @@ class Engine {
   // Debug: ignore SH view-dependent terms, use DC only.
   void SetDcOnly(bool dc_only);
 
+  // Hyperscape compatibility: boost opacity in logit space to compensate for
+  // rasterizer (alpha blending) vs Constellus ray-marcher accumulation differences.
+  void SetOpacityBias(float bias);
+
   void Run();
 
   void Close();

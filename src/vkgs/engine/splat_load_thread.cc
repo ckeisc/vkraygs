@@ -40,7 +40,7 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
                   size_t* point_count, int* stride_bytes, const std::function<bool()>& cancelled,
                   const std::function<void(uint32_t)>& progress,
                   const std::string& cull_masks_path = "", int cull_view_index = -1,
-                  bool dc_only = false) {
+                  bool dc_only = false, float opacity_bias = 0.0f) {
   spz::GaussianCloud cloud = spz::loadSpz(path, spz::UnpackOptions());
 
   // Optional visibility-cluster culling (Hyperscape od_cluster_masks).
@@ -124,7 +124,7 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
         v[27 + c] = g;
         v[43 + c] = b;
       }
-      v[58] = cloud.alphas[i];  // logit; sigmoid applied on GPU
+      v[58] = cloud.alphas[i] + opacity_bias;  // logit; sigmoid applied on GPU
     }
     progress(start + count);
   }
@@ -193,7 +193,7 @@ class SplatLoadThread::Impl {
                     std::unique_lock<std::mutex> guard{mutex_};
                     loaded_point_count_ = loaded;
                   },
-                  cull_masks_path_, cull_view_index_, dc_only_)) {
+                  cull_masks_path_, cull_view_index_, dc_only_, opacity_bias_)) {
             continue;
           }
           {
@@ -394,6 +394,11 @@ class SplatLoadThread::Impl {
     dc_only_ = dc_only;
   }
 
+  void SetOpacityBias(float bias) {
+    std::unique_lock<std::mutex> guard{mutex_};
+    opacity_bias_ = bias;
+  }
+
   Progress GetProgress() {
     Progress result;
     std::unique_lock<std::mutex> guard{mutex_};
@@ -422,6 +427,7 @@ class SplatLoadThread::Impl {
   std::string cull_masks_path_;
   int cull_view_index_ = -1;
   bool dc_only_ = false;
+  float opacity_bias_ = 0.0f;
 
   uint32_t total_point_count_ = 0;
   uint32_t loaded_point_count_ = 0;
@@ -454,6 +460,10 @@ void SplatLoadThread::SetCullMasks(const std::string& masks_path, int view_index
 
 void SplatLoadThread::SetDcOnly(bool dc_only) {
   impl_->SetDcOnly(dc_only);
+}
+
+void SplatLoadThread::SetOpacityBias(float bias) {
+  impl_->SetOpacityBias(bias);
 }
 
 SplatLoadThread::Progress SplatLoadThread::GetProgress() { return impl_->GetProgress(); }

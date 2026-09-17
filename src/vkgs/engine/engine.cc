@@ -656,6 +656,10 @@ class Engine::Impl {
     splat_load_thread_.SetDcOnly(dc_only);
   }
 
+  void SetOpacityBias(float bias) {
+    splat_load_thread_.SetOpacityBias(bias);
+  }
+
   // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
   static bool LoadCullCentroids(const std::string& path, std::vector<glm::vec3>* out) {
     std::ifstream f(path);
@@ -2148,6 +2152,10 @@ void Engine::SetCullCentroids(const std::string& centroids_path) {
 
 void Engine::SetDcOnly(bool dc_only) {
   impl_->SetDcOnly(dc_only);
+}
+
+void Engine::SetOpacityBias(float bias) {
+  impl_->SetOpacityBias(bias);
 }
 
 void Engine::Run() { impl_->Run(); }
