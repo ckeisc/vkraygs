@@ -40,7 +40,41 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
                   size_t* point_count, int* stride_bytes, const std::function<bool()>& cancelled,
                   const std::function<void(uint32_t)>& progress) {
   spz::GaussianCloud cloud = spz::loadSpz(path, spz::UnpackOptions());
-  
+
+  // Optional visibility-cluster culling (Hyperscape od_cluster_masks).
+  // VKGS_CULL_MASKS=/path/to/cluster_masks.bin, VKGS_CULL_VIEW=<0-63>
+  if (const char* masks_path = getenv("VKGS_CULL_MASKS")) {
+    const char* view_str = getenv("VKGS_CULL_VIEW");
+    const int view_idx = view_str ? atoi(view_str) : 0;
+    const size_t n0 = static_cast<size_t>(cloud.numPoints);
+    std::vector<uint64_t> masks(n0);
+    std::ifstream mf(masks_path, std::ios::binary);
+    mf.read(reinterpret_cast<char*>(masks.data()), n0 * sizeof(uint64_t));
+    if (mf) {
+      const uint64_t bit = 1ULL << view_idx;
+      const size_t sh_per = cloud.sh.empty() ? 0 : cloud.sh.size() / n0;
+      spz::GaussianCloud culled;
+      culled.shDegree = cloud.shDegree;
+      culled.antialiased = cloud.antialiased;
+      size_t kept = 0;
+      for (size_t i = 0; i < n0; ++i) {
+        if (!(masks[i] & bit)) continue;
+        culled.positions.insert(culled.positions.end(), cloud.positions.begin() + i * 3, cloud.positions.begin() + i * 3 + 3);
+        culled.scales.insert(culled.scales.end(), cloud.scales.begin() + i * 3, cloud.scales.begin() + i * 3 + 3);
+        culled.rotations.insert(culled.rotations.end(), cloud.rotations.begin() + i * 4, cloud.rotations.begin() + i * 4 + 4);
+        culled.alphas.push_back(cloud.alphas[i]);
+        culled.colors.insert(culled.colors.end(), cloud.colors.begin() + i * 3, cloud.colors.begin() + i * 3 + 3);
+        if (sh_per) culled.sh.insert(culled.sh.end(), cloud.sh.begin() + i * sh_per, cloud.sh.begin() + i * sh_per + sh_per);
+        ++kept;
+      }
+      culled.numPoints = static_cast<int32_t>(kept);
+      fprintf(stderr, "[spz] cluster culling: view %d, %zu -> %zu splats\n", view_idx, n0, kept);
+      cloud = std::move(culled);
+    } else {
+      fprintf(stderr, "[spz] warning: could not read cull masks %s\n", masks_path);
+    }
+  }
+
   if (cloud.numPoints <= 0) {
     fprintf(stderr, "[spz] failed to load %s\n", path.c_str());
     return false;
