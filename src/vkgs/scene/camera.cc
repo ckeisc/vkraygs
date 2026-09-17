@@ -79,6 +79,22 @@ void Camera::Translate(float x, float y, float z) {
 
 void Camera::Zoom(float x) { r_ /= std::exp(zoom_sensitivity_ * x); }
 
+void Camera::Dolly(float amount) {
+  const auto sin_phi = std::sin(phi_);
+  const auto cos_phi = std::cos(phi_);
+  const auto sin_theta = std::sin(theta_);
+  const auto cos_theta = std::cos(theta_);
+  glm::vec3 forward;
+  if (z_up_) {
+    forward = glm::vec3(sin_phi * sin_theta, sin_phi * cos_theta, cos_phi);
+  } else {
+    forward = glm::vec3(sin_phi * sin_theta, cos_phi, sin_phi * cos_theta);
+  }
+  // forward points from center to camera; view direction is -forward.
+  // Move center along -forward to fly into the scene (fixed speed, not scaled by r_).
+  center_ += -amount * dolly_sensitivity_ * forward;
+}
+
 void Camera::DollyZoom(float scroll) {
   float new_fov = std::clamp(fovy_ - scroll * dolly_zoom_sensitivity_, min_fov(), max_fov());
   SetFov(new_fov);

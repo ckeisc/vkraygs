@@ -889,8 +889,10 @@ class Engine::Impl {
         if (io.MouseWheel != 0.f) {
           if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
             camera_.DollyZoom(io.MouseWheel);
-          } else {
+          } else if (ImGui::IsKeyDown(ImGuiKey_LeftShift)) {
             camera_.Zoom(io.MouseWheel * 10.f);
+          } else {
+            camera_.Dolly(io.MouseWheel);
           }
         }
       }
