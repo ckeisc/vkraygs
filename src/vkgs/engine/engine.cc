@@ -666,7 +666,9 @@ class Engine::Impl {
 
       // handle dropped files
       for (const auto& filepath : viewer_.ConsumeDroppedFilepaths()) {
-        if (filepath.length() > 4 && filepath.substr(filepath.length() - 4) == ".ply") {
+        const bool is_ply = filepath.length() > 4 && filepath.substr(filepath.length() - 4) == ".ply";
+        const bool is_spz = filepath.length() > 4 && filepath.substr(filepath.length() - 4) == ".spz";
+        if (is_ply || is_spz) {
           LoadSplatsAsync(filepath);
           break;
         }
