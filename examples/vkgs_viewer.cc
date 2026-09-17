@@ -117,9 +117,38 @@ int main(int argc, char** argv) {
       std::cout << "batch mode: " << views.size() << " poses, kernel=" << kernel << std::endl;
     }
 
-    const std::string cull_masks = parser.get<std::string>("cull-masks");
-    const std::string cull_centroids = parser.get<std::string>("cull-centroids");
+    std::string cull_masks = parser.get<std::string>("cull-masks");
+    std::string cull_centroids = parser.get<std::string>("cull-centroids");
     const int cull_view = parser.get<int>("cull-view");
+
+    // QOL: auto-detect Hyperscape sidecar files.
+    // If input is "foo.spz" and "foo_cluster_masks.bin" exists alongside it,
+    // use it without requiring --cull-masks. Same for "foo_cluster_centroids.json".
+    if (parser.is_used("input")) {
+      const std::string input_path = parser.get<std::string>("input");
+      if (input_path.size() > 4 &&
+          (input_path.substr(input_path.size() - 4) == ".spz" ||
+           input_path.substr(input_path.size() - 4) == ".SPZ")) {
+        const std::string base = input_path.substr(0, input_path.size() - 4);
+        if (cull_masks.empty()) {
+          const std::string auto_masks = base + "_cluster_masks.bin";
+          std::ifstream test(auto_masks);
+          if (test.good()) {
+            cull_masks = auto_masks;
+            std::cout << "auto-detected cull masks: " << auto_masks << std::endl;
+          }
+        }
+        if (cull_centroids.empty()) {
+          const std::string auto_centroids = base + "_cluster_centroids.json";
+          std::ifstream test(auto_centroids);
+          if (test.good()) {
+            cull_centroids = auto_centroids;
+            std::cout << "auto-detected cull centroids: " << auto_centroids << std::endl;
+          }
+        }
+      }
+    }
+
     if (!cull_masks.empty() && !cull_centroids.empty()) {
       // Dynamic GPU culling: no CPU filtering (view_index=-1), masks go to GPU.
       engine.SetCullMasks(cull_masks, -1);
