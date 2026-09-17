@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
       .help("visibility-cluster masks file (Hyperscape od_cluster_masks.bin) for occlusion culling");
   parser.add_argument("--cull-view")
       .default_value(-1)
+      .scan<'i', int>()
       .help("viewpoint index (0-63) for --cull-masks; nearest to camera");
   try {
     parser.parse_args(argc, argv);
