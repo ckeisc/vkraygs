@@ -585,8 +585,12 @@ class Engine::Impl {
       splat_storage_.inverse_index = vk::Buffer(context_, MAX_SPLAT_COUNT * sizeof(uint32_t),
                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
-      splat_storage_.instance = vk::Buffer(context_, MAX_SPLAT_COUNT * 14 * sizeof(float),
+      // GS: 12 floats (3x vec4) per instance. RayGS: 14 floats per instance.
+      // Separate buffers to avoid layout/stride confusion when switching kernels.
+      splat_storage_.instance = vk::Buffer(context_, MAX_SPLAT_COUNT * 12 * sizeof(float),
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+      splat_storage_.instance_raygs = vk::Buffer(context_, MAX_SPLAT_COUNT * 14 * sizeof(float),
+                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     }
 
     {
@@ -1663,6 +1667,28 @@ class Engine::Impl {
 
           vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, model_type_ == ModelType::GS?projection_pipeline_:raygs_projection_pipeline_);
 
+          // Bind the correct instance buffer for the active kernel. GS uses
+          // 12 floats/instance (3x vec4), RayGS uses 14 floats/instance.
+          // Separate buffers avoid stride/layout confusion when switching.
+          {
+            std::vector<VkDescriptorSet> proj_descriptors = {
+                descriptors_[frame_index].camera,
+                descriptors_[frame_index].gaussian,
+                descriptors_[frame_index].splat_instance,
+            };
+            // Update binding 1 to point to the kernel-specific instance buffer.
+            // Note: splat_instance descriptor was created with the shared buffer;
+            // we need to update it here for the active kernel.
+            vk::Buffer& instance_buf = (model_type_ == ModelType::GS)
+                ? splat_storage_.instance
+                : splat_storage_.instance_raygs;
+            size_t instance_floats = (model_type_ == ModelType::GS) ? 12 : 14;
+            descriptors_[frame_index].splat_instance.Update(
+                1, instance_buf, 0, loaded_point_count_ * instance_floats * sizeof(float));
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 0,
+                                    proj_descriptors.size(), proj_descriptors.data(), 0, nullptr);
+          }
+
           vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(splat_push_constants_), &splat_push_constants_);
 
           vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestamp_query_pool, 7);
@@ -2143,7 +2169,8 @@ class Engine::Impl {
     vk::Buffer index;          // (N)
     vk::Buffer inverse_index;  // (N)
 
-    vk::Buffer instance;  // (N, 12)
+    vk::Buffer instance;        // (N, 12) for GS: 3x vec4 (ndc_pos, rot_scale, color)
+    vk::Buffer instance_raygs;  // (N, 14) for RayGS: 14 floats (T matrix, color, opacity)
   };
   SplatStorage splat_storage_;
   vk::Buffer sort_storage_;
