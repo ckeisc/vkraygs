@@ -1506,11 +1506,20 @@ class Engine::Impl {
 
         // hold buffer until the end of frame
         frame_info.ply_buffer = progress.ply_buffer;
+        // Also keep a persistent copy for opacity-bias re-dispatch (PageUp/PageDown).
+        // The FrameInfo buffer is freed after the load frame; we need the source
+        // data alive for the lifetime of the scene.
+        persistent_ply_buffer_ = progress.ply_buffer;
       }
 
       // Re-run parse_ply if opacity bias changed via PageUp/PageDown.
-      // Descriptors already point to the loaded PLY data; just push new bias and dispatch.
+      // Re-bind the persistent PLY buffer (the per-frame descriptor may be stale).
       if (opacity_bias_dirty_ && loaded_point_count_ > 0) {
+        // Refresh the PLY descriptor with the persistent buffer. The descriptor
+        // was last updated during the load frame; the buffer it pointed to has
+        // since been freed. Using the stale descriptor reads garbage.
+        descriptors_[frame_index].ply.Update(0, persistent_ply_buffer_, 0);
+
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, parse_ply_pipeline_);
 
         VkDescriptorSet descriptor = descriptors_[frame_index].gaussian;
@@ -2154,6 +2163,10 @@ class Engine::Impl {
   // Hyperscape compatibility: GPU-side logit opacity bias (PageUp/PageDown adjustable).
   float opacity_bias_ = 0.0f;
   bool opacity_bias_dirty_ = false;
+  // Persistent PLY source buffer for opacity-bias re-dispatch. The per-frame
+  // FrameInfo::ply_buffer is only held until end of the load frame; we need
+  // the source data alive for the lifetime of the scene to re-run parse_ply.
+  vk::Buffer persistent_ply_buffer_;
   std::vector<std::array<float, 16>> batch_views_;
   std::vector<std::array<float, 3>> batch_eyes_;
   std::string batch_out_dir_ = ".";
