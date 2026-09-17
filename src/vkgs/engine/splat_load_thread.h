@@ -34,6 +34,10 @@ class SplatLoadThread {
 
   void Start(const std::string& ply_filepath);
 
+  // Visibility-cluster culling: masks_path is per-splat uint64 bitmasks,
+  // view_index selects the viewpoint bit (0-63). Empty path disables.
+  void SetCullMasks(const std::string& masks_path, int view_index);
+
   Progress GetProgress();
 
   void Cancel();

@@ -26,5 +26,5 @@ if not exist "%VIEWER%" (
     exit /b 1
 )
 
-python "%~dp0render_comparison.py" --spz "%SPZ%" --poses "%POSES%" --viewer "%VIEWER%" --outdir "%OUTDIR%"
+python "%~dp0render_comparison.py" --spz "%SPZ%" --poses "%POSES%" --viewer "%VIEWER%" --outdir "%OUTDIR%" %CULL_ARGS%
 endlocal

@@ -38,17 +38,16 @@ constexpr int kSpzStrideFloats = 59;
 //
 bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, std::vector<char>& buffer_,
                   size_t* point_count, int* stride_bytes, const std::function<bool()>& cancelled,
-                  const std::function<void(uint32_t)>& progress) {
+                  const std::function<void(uint32_t)>& progress,
+                  const std::string& cull_masks_path = "", int cull_view_index = -1) {
   spz::GaussianCloud cloud = spz::loadSpz(path, spz::UnpackOptions());
 
   // Optional visibility-cluster culling (Hyperscape od_cluster_masks).
-  // VKGS_CULL_MASKS=/path/to/cluster_masks.bin, VKGS_CULL_VIEW=<0-63>
-  if (const char* masks_path = getenv("VKGS_CULL_MASKS")) {
-    const char* view_str = getenv("VKGS_CULL_VIEW");
-    const int view_idx = view_str ? atoi(view_str) : 0;
+  if (!cull_masks_path.empty() && cull_view_index >= 0) {
+    const int view_idx = cull_view_index;
     const size_t n0 = static_cast<size_t>(cloud.numPoints);
     std::vector<uint64_t> masks(n0);
-    std::ifstream mf(masks_path, std::ios::binary);
+    std::ifstream mf(cull_masks_path, std::ios::binary);
     mf.read(reinterpret_cast<char*>(masks.data()), n0 * sizeof(uint64_t));
     if (mf) {
       const uint64_t bit = 1ULL << view_idx;
@@ -71,7 +70,7 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
       fprintf(stderr, "[spz] cluster culling: view %d, %zu -> %zu splats\n", view_idx, n0, kept);
       cloud = std::move(culled);
     } else {
-      fprintf(stderr, "[spz] warning: could not read cull masks %s\n", masks_path);
+      fprintf(stderr, "[spz] warning: could not read cull masks %s\n", cull_masks_path.c_str());
     }
   }
 
@@ -192,7 +191,8 @@ class SplatLoadThread::Impl {
                   [this](uint32_t loaded) {
                     std::unique_lock<std::mutex> guard{mutex_};
                     loaded_point_count_ = loaded;
-                  })) {
+                  },
+                  cull_masks_path_, cull_view_index_)) {
             continue;
           }
           {
@@ -382,6 +382,12 @@ class SplatLoadThread::Impl {
     cv_.notify_one();
   }
 
+  void SetCullMasks(const std::string& masks_path, int view_index) {
+    std::unique_lock<std::mutex> guard{mutex_};
+    cull_masks_path_ = masks_path;
+    cull_view_index_ = view_index;
+  }
+
   Progress GetProgress() {
     Progress result;
     std::unique_lock<std::mutex> guard{mutex_};
@@ -407,6 +413,8 @@ class SplatLoadThread::Impl {
   std::condition_variable cv_;
 
   std::string ply_filepath_;
+  std::string cull_masks_path_;
+  int cull_view_index_ = -1;
 
   uint32_t total_point_count_ = 0;
   uint32_t loaded_point_count_ = 0;
@@ -432,6 +440,10 @@ SplatLoadThread::SplatLoadThread(vk::Context context) : impl_(std::make_shared<I
 SplatLoadThread::~SplatLoadThread() = default;
 
 void SplatLoadThread::Start(const std::string& ply_filepath) { impl_->Start(ply_filepath); }
+
+void SplatLoadThread::SetCullMasks(const std::string& masks_path, int view_index) {
+  impl_->SetCullMasks(masks_path, view_index);
+}
 
 SplatLoadThread::Progress SplatLoadThread::GetProgress() { return impl_->GetProgress(); }
 

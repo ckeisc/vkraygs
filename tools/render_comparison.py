@@ -93,15 +93,37 @@ def pick_pose_indices(n_poses, count=3):
     return [int(round(i * (n_poses - 1) / (count - 1))) for i in range(count)]
 
 
+def load_cluster_viewpoints(centroids_path):
+    """Load cluster viewpoint positions from centroids JSON. Returns list of (x,y,z)."""
+    with open(centroids_path) as f:
+        data = json.load(f)
+    # centroids JSON has 'views' list or similar; adapt to actual format
+    views = data.get("views", data.get("viewpoints", []))
+    return [(v[0], v[1], v[2]) for v in views]
+
+
+def nearest_viewpoint(eye, viewpoints):
+    """Find index of nearest viewpoint to camera position eye (x,y,z)."""
+    best, best_d2 = 0, float("inf")
+    for i, v in enumerate(viewpoints):
+        d2 = (eye[0]-v[0])**2 + (eye[1]-v[1])**2 + (eye[2]-v[2])**2
+        if d2 < best_d2:
+            best, best_d2 = i, d2
+    return best
+
+
 # ----------------------------------------------------------------------------
 # Rendering
 # ----------------------------------------------------------------------------
 
-def run_viewer(viewer, spz, kernel, views_file, outdir, prefix):
+def run_viewer(viewer, spz, kernel, views_file, outdir, prefix,
+               cull_masks="", cull_view=-1):
     """Run vkgs_viewer batch CLI for one kernel. Returns list of PNG paths."""
     os.makedirs(outdir, exist_ok=True)
     cmd = [viewer, "-i", spz, "--kernel", kernel,
            "--views", views_file, "--outdir", outdir, "--prefix", prefix]
+    if cull_masks and cull_view >= 0:
+        cmd += ["--cull-masks", cull_masks, "--cull-view", str(cull_view)]
     print(f"[render] {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     print(proc.stdout)
@@ -264,6 +286,10 @@ def main():
                     help="how many evenly spaced poses to render (default 3)")
     ap.add_argument("--pose-indices", default="",
                     help="comma-separated pose indices (overrides --num-poses)")
+    ap.add_argument("--cull-masks", default="",
+                    help="cluster_masks.bin for visibility culling (optional)")
+    ap.add_argument("--cull-centroids", default="",
+                    help="cluster_centroids.json (required with --cull-masks)")
     args = ap.parse_args()
 
     poses_c2w, intrinsics = load_colmap_poses(args.poses)
@@ -283,11 +309,43 @@ def main():
     write_views_file(poses_c2w, indices, views_file)
     print(f"[views] wrote {views_file}")
 
+    # Visibility culling: compute nearest viewpoint per pose if enabled.
+    cull_views = {}
+    if args.cull_masks:
+        if not args.cull_centroids:
+            raise SystemExit("--cull-centroids required with --cull-masks")
+        viewpoints = load_cluster_viewpoints(args.cull_centroids)
+        print(f"[cull] loaded {len(viewpoints)} viewpoints from {args.cull_centroids}")
+        for pi in indices:
+            _, eye = c2w_to_view_and_eye(poses_c2w[pi])
+            vi = nearest_viewpoint(eye, viewpoints)
+            cull_views[pi] = vi
+            print(f"[cull] pose {pi}: eye={tuple(round(x,3) for x in eye)} -> view {vi}")
+
     gs_dir = os.path.join(args.outdir, "gs")
     raygs_dir = os.path.join(args.outdir, "raygs")
-    gs_paths = run_viewer(args.viewer, args.spz, "gs", views_file, gs_dir, "gs")
-    raygs_paths = run_viewer(args.viewer, args.spz, "raygs",
-                             views_file, raygs_dir, "raygs")
+    if cull_views:
+        # Per-pose rendering: each pose gets its own viewpoint culling.
+        gs_paths, raygs_paths = [], []
+        for j, pi in enumerate(indices):
+            vi = cull_views[pi]
+            pvf = os.path.join(args.outdir, f"views_pose{pi:03d}.txt")
+            write_views_file(poses_c2w, [pi], pvf)
+            gp = run_viewer(args.viewer, args.spz, "gs", pvf, gs_dir,
+                            f"gs_pose{j:03d}", args.cull_masks, vi)[0]
+            # Rename to expected pattern for report
+            gp_final = os.path.join(gs_dir, f"gs_pose{j:03d}.png")
+            os.rename(gp, gp_final) if gp != gp_final else None
+            rp = run_viewer(args.viewer, args.spz, "raygs", pvf, raygs_dir,
+                            f"raygs_pose{j:03d}", args.cull_masks, vi)[0]
+            rp_final = os.path.join(raygs_dir, f"raygs_pose{j:03d}.png")
+            os.rename(rp, rp_final) if rp != rp_final else None
+            gs_paths.append(gp_final)
+            raygs_paths.append(rp_final)
+    else:
+        gs_paths = run_viewer(args.viewer, args.spz, "gs", views_file, gs_dir, "gs")
+        raygs_paths = run_viewer(args.viewer, args.spz, "raygs",
+                                 views_file, raygs_dir, "raygs")
 
     report = {"scan": os.path.basename(args.spz),
               "pose_indices": indices,

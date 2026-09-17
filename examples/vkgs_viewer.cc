@@ -53,6 +53,12 @@ int main(int argc, char** argv) {
             "(16 floats view matrix column-major + 3 floats eye)");
   parser.add_argument("--outdir").default_value(std::string(".")).help("batch mode: output directory for PNGs");
   parser.add_argument("--prefix").default_value(std::string("shot")).help("batch mode: output filename prefix");
+  parser.add_argument("--cull-masks")
+      .default_value(std::string(""))
+      .help("visibility-cluster masks file (Hyperscape od_cluster_masks.bin) for occlusion culling");
+  parser.add_argument("--cull-view")
+      .default_value(-1)
+      .help("viewpoint index (0-63) for --cull-masks; nearest to camera");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -85,6 +91,13 @@ int main(int argc, char** argv) {
       engine.SetBatchViews(views, eyes);
       engine.SetBatchOutput(parser.get<std::string>("outdir"), parser.get<std::string>("prefix"));
       std::cout << "batch mode: " << views.size() << " poses, kernel=" << kernel << std::endl;
+    }
+
+    const std::string cull_masks = parser.get<std::string>("cull-masks");
+    const int cull_view = parser.get<int>("cull-view");
+    if (!cull_masks.empty() && cull_view >= 0) {
+      engine.SetCullMasks(cull_masks, cull_view);
+      std::cout << "culling: masks=" << cull_masks << " view=" << cull_view << std::endl;
     }
 
     if (parser.is_used("input")) {

@@ -28,6 +28,10 @@ class Engine {
                      const std::vector<std::array<float, 3>>& eyes);
   void SetBatchOutput(const std::string& dir, const std::string& prefix);
 
+  // Visibility-cluster occlusion culling (Hyperscape od_cluster_masks.bin).
+  // masks_path: per-splat uint64 visibility bitmasks; view_index: 0-63 viewpoint.
+  void SetCullMasks(const std::string& masks_path, int view_index);
+
   void Run();
 
   void Close();

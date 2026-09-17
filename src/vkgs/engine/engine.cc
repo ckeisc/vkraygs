@@ -628,6 +628,10 @@ class Engine::Impl {
     batch_prefix_ = prefix;
   }
 
+  void SetCullMasks(const std::string& masks_path, int view_index) {
+    splat_load_thread_.SetCullMasks(masks_path, view_index);
+  }
+
   void LoadSplatsAsync(const std::string& ply_filepath) {
     std::unique_lock<std::mutex> guard{mutex_};
     pending_ply_filepath_ = ply_filepath;
@@ -1940,6 +1944,10 @@ void Engine::SetBatchViews(const std::vector<std::array<float, 16>>& views,
 
 void Engine::SetBatchOutput(const std::string& dir, const std::string& prefix) {
   impl_->SetBatchOutput(dir, prefix);
+}
+
+void Engine::SetCullMasks(const std::string& masks_path, int view_index) {
+  impl_->SetCullMasks(masks_path, view_index);
 }
 
 void Engine::Run() { impl_->Run(); }
