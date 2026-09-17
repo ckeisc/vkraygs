@@ -15,4 +15,4 @@
 	url = https://github.com/p-ranav/argparse.git
 [submodule "third_party/vulkan_radix_sort"]
 	path = third_party/vulkan_radix_sort
-	url = https://github.com/jaesung-cs/vulkan_radix_sort.git
+	url = https://github.com/ckeisc/vulkan_radix_sort.git

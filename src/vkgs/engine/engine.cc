@@ -12,6 +12,14 @@
 #include <algorithm>
 #include <mutex>
 #include <map>
+#include <array>
+#include <cstdio>
+#include <vector>
+
+#include <vulkan/vulkan.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 #include <vulkan/vulkan.h>
 
@@ -604,6 +612,20 @@ class Engine::Impl {
     splat_load_thread_.Start(ply_filepath);
   }
 
+  void SetKernelRayGS(bool raygs) { batch_raygs_ = raygs; }
+
+  void SetBatchViews(const std::vector<std::array<float, 16>>& views,
+                     const std::vector<std::array<float, 3>>& eyes) {
+    batch_views_ = views;
+    batch_eyes_ = eyes;
+    batch_mode_ = !views.empty() && views.size() == eyes.size();
+  }
+
+  void SetBatchOutput(const std::string& dir, const std::string& prefix) {
+    batch_out_dir_ = dir;
+    batch_prefix_ = prefix;
+  }
+
   void LoadSplatsAsync(const std::string& ply_filepath) {
     std::unique_lock<std::mutex> guard{mutex_};
     pending_ply_filepath_ = ply_filepath;
@@ -627,6 +649,16 @@ class Engine::Impl {
 
     viewer_.Show();
     terminate_ = false;
+
+    if (batch_mode_) {
+      // clean renders: no axis/grid helpers, no ImGui overlay
+      show_axis_ = false;
+      show_grid_ = false;
+      model_type_ = batch_raygs_ ? ModelType::RayGS : ModelType::GS;
+      std::cout << "[batch] rendering " << batch_views_.size() << " poses ("
+                << (batch_raygs_ ? "raygs" : "gs") << ") -> " << batch_out_dir_ << "/" << batch_prefix_
+                << "_poseNNN.png" << std::endl;
+    }
 
     // main loop
     while (!viewer_.ShouldClose() && !terminate_) {
@@ -795,7 +827,10 @@ class Engine::Impl {
     submit_info.pCommandBuffers = &cb;
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &transfer_semaphore_;
-    vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, NULL);
+    {
+      std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+      vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, NULL);
+    }
 
     transfer_timeline_++;
   }
@@ -1128,9 +1163,27 @@ class Engine::Impl {
     }
 
     camera_buffer_[frame_index].projection = camera_.ProjectionMatrix();
-    camera_buffer_[frame_index].view = camera_.ViewMatrix();
-    camera_buffer_[frame_index].camera_position = camera_.Eye();
+    if (batch_mode_ && batch_index_ < batch_views_.size()) {
+      // batch pose: explicit view matrix + eye position
+      camera_buffer_[frame_index].view = glm::make_mat4(batch_views_[batch_index_].data());
+      const auto& e = batch_eyes_[batch_index_];
+      camera_buffer_[frame_index].camera_position = glm::vec3(e[0], e[1], e[2]);
+    } else {
+      camera_buffer_[frame_index].view = camera_.ViewMatrix();
+      camera_buffer_[frame_index].camera_position = camera_.Eye();
+    }
     camera_buffer_[frame_index].screen_size = {camera_.width(), camera_.height()};
+
+    // batch capture state machine: arm once the loaded splat count is stable
+    batch_armed_ = false;
+    if (batch_mode_ && batch_index_ < batch_views_.size()) {
+      if (loaded_point_count_ > 0 && loaded_point_count_ == batch_last_loaded_) {
+        if (++batch_warmup_ >= 4) batch_armed_ = true;
+      } else {
+        batch_warmup_ = 0;
+      }
+      batch_last_loaded_ = loaded_point_count_;
+    }
 
     // recreate swapchain if need resize
     if (swapchain_.ShouldRecreate()) {
@@ -1295,7 +1348,9 @@ class Engine::Impl {
         }
 
         // radix sort
-        {
+        // Note: VKGS_SKIP_SORT=1 works around a crash in the third-party radix
+        // sort library on Mesa Lavapipe (software Vulkan). Not needed on real GPUs.
+        if (getenv("VKGS_SKIP_SORT") == nullptr) {
           vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, timestamp_query_pool, 3);
 
           vrdxCmdSortKeyValueIndirect(cb, sorter_, loaded_point_count_, splat_visible_point_count_, 0,
@@ -1381,6 +1436,10 @@ class Engine::Impl {
       }
 
       vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, timestamp_query_pool, 11);
+
+      // batch screenshot: copy the presented swapchain image to a staging buffer
+      if (batch_armed_) RecordScreenshot(cb, image_index);
+
       vkEndCommandBuffer(cb);
 
       std::vector<VkSemaphore> wait_semaphores = {image_acquired_semaphore, transfer_semaphore_};
@@ -1404,7 +1463,10 @@ class Engine::Impl {
       submit_info.pCommandBuffers = &cb;
       submit_info.signalSemaphoreCount = 1;
       submit_info.pSignalSemaphores = &render_finished_semaphore;
-      vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, render_finished_fence);
+      {
+        std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+        vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, render_finished_fence);
+      }
 
       VkSwapchainKHR swapchain_handle = swapchain_;
       VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -1416,6 +1478,21 @@ class Engine::Impl {
       frame_info.present_timestamp = Clock::timestamp();
       vkQueuePresentKHR(context_.graphics_queue(), &present_info);
       frame_info.present_done_timestamp = Clock::timestamp();
+
+      if (batch_armed_) {
+        // the screenshot copy was recorded into this frame's command buffer;
+        // wait for it, write the PNG, then advance to the next pose
+        VkFence fence = render_finished_fences_[frame_index];
+        vkWaitForFences(context_.device(), 1, &fence, VK_TRUE, UINT64_MAX);
+        WriteScreenshotPng(batch_index_);
+        batch_armed_ = false;
+        batch_warmup_ = 0;
+        batch_last_loaded_ = 0;
+        if (++batch_index_ >= batch_views_.size()) {
+          std::cout << "[batch] done (" << batch_views_.size() << " poses)" << std::endl;
+          terminate_ = true;
+        }
+      }
 
       frame_counter_++;
     }
@@ -1457,6 +1534,60 @@ class Engine::Impl {
 
       RecreateFramebuffer();
     }
+  }
+
+  void RecordScreenshot(VkCommandBuffer cb, uint32_t image_index) {
+    const uint32_t w = swapchain_.width();
+    const uint32_t h = swapchain_.height();
+    const VkDeviceSize need = static_cast<VkDeviceSize>(w) * h * 4;
+    if (screenshot_size_ != need) {
+      screenshot_staging_ = vk::CpuBuffer(context_, need);
+      screenshot_size_ = need;
+    }
+
+    VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = swapchain_.image(image_index);
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region = {};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(cb, swapchain_.image(image_index), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           screenshot_staging_, 1, &region);
+
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = 0;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+  }
+
+  void WriteScreenshotPng(size_t pose_index) {
+    const uint32_t w = swapchain_.width();
+    const uint32_t h = swapchain_.height();
+    const uint8_t* src = static_cast<const uint8_t*>(screenshot_staging_.data());
+    std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+    // swapchain is B8G8R8A8_UNORM; stb_image_write expects RGBA
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+      rgba[4 * i + 0] = src[4 * i + 2];
+      rgba[4 * i + 1] = src[4 * i + 1];
+      rgba[4 * i + 2] = src[4 * i + 0];
+      rgba[4 * i + 3] = src[4 * i + 3];
+    }
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/%s_pose%03zu.png", batch_out_dir_.c_str(), batch_prefix_.c_str(),
+                  pose_index);
+    stbi_write_png(path, w, h, 4, rgba.data(), w * 4);
+    std::cout << "[batch] wrote " << path << std::endl;
   }
 
   void DrawNormalPass(VkCommandBuffer cb, uint32_t frame_index, uint32_t width, uint32_t height,
@@ -1578,8 +1709,8 @@ class Engine::Impl {
       }
     }
 
-    // draw ui
-    viewer_.DrawUi(cb);
+    // draw ui (skipped in batch mode for clean captures)
+    if (!batch_mode_) viewer_.DrawUi(cb);
 
     vkCmdEndRenderPass(cb);
   }
@@ -1769,6 +1900,20 @@ class Engine::Impl {
   static constexpr uint32_t timestamp_count_ = 12;
   std::vector<VkQueryPool> timestamp_query_pools_;
 
+  // batch (headless) rendering state
+  bool batch_mode_ = false;
+  bool batch_raygs_ = true;
+  std::vector<std::array<float, 16>> batch_views_;
+  std::vector<std::array<float, 3>> batch_eyes_;
+  std::string batch_out_dir_ = ".";
+  std::string batch_prefix_ = "shot";
+  size_t batch_index_ = 0;
+  int batch_warmup_ = 0;
+  uint32_t batch_last_loaded_ = 0;
+  bool batch_armed_ = false;
+  vk::CpuBuffer screenshot_staging_;
+  VkDeviceSize screenshot_size_ = 0;
+
   uint64_t frame_counter_ = 0;
 };
 
@@ -1779,6 +1924,17 @@ Engine::~Engine() = default;
 void Engine::LoadSplats(const std::string& ply_filepath) { impl_->LoadSplats(ply_filepath); }
 
 void Engine::LoadSplatsAsync(const std::string& ply_filepath) { impl_->LoadSplatsAsync(ply_filepath); }
+
+void Engine::SetKernelRayGS(bool raygs) { impl_->SetKernelRayGS(raygs); }
+
+void Engine::SetBatchViews(const std::vector<std::array<float, 16>>& views,
+                           const std::vector<std::array<float, 3>>& eyes) {
+  impl_->SetBatchViews(views, eyes);
+}
+
+void Engine::SetBatchOutput(const std::string& dir, const std::string& prefix) {
+  impl_->SetBatchOutput(dir, prefix);
+}
 
 void Engine::Run() { impl_->Run(); }
 

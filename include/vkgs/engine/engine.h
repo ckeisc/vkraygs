@@ -1,8 +1,10 @@
 #ifndef VKGS_ENGINE_ENGINE_H
 #define VKGS_ENGINE_ENGINE_H
 
+#include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace vkgs {
 
@@ -15,6 +17,13 @@ class Engine {
 
   void LoadSplats(const std::string& ply_filepath);
   void LoadSplatsAsync(const std::string& ply_filepath);
+
+  // Batch (headless) rendering: render each pose to a PNG and return.
+  // Views are column-major 4x4 view matrices; eyes are camera positions.
+  void SetKernelRayGS(bool raygs);
+  void SetBatchViews(const std::vector<std::array<float, 16>>& views,
+                     const std::vector<std::array<float, 3>>& eyes);
+  void SetBatchOutput(const std::string& dir, const std::string& prefix);
 
   void Run();
 

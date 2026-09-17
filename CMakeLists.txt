@@ -70,6 +70,10 @@ add_library(vkgs SHARED
   third_party/imgui/imgui_demo.cpp
   third_party/imgui/imgui_tables.cpp
   third_party/imgui/imgui_widgets.cpp
+  # spz (native .spz loading)
+  third_party/spz/src/cc/load-spz.cc
+  third_party/spz/src/cc/splat-types.cc
+  third_party/spz/src/cc/splat-c-types.cc
 )
 
 target_include_directories(vkgs
@@ -78,11 +82,15 @@ target_include_directories(vkgs
     src
     third_party/imgui
     third_party/imgui/backends
+    third_party/spz/src/cc
+    third_party/stb
 )
 
 target_link_libraries(vkgs
   PUBLIC glm
   PRIVATE Vulkan::Vulkan VulkanMemoryAllocator vk_radix_sort glfw
+  $ENV{HOME}/workspace/.jarvis/idea-executions/966c8119-905c-41c4-a1fb-4087daaeabd3/scratch/deps/sysroot/usr/lib/x86_64-linux-gnu/libzstd.so.1
+  $ENV{HOME}/workspace/.jarvis/idea-executions/966c8119-905c-41c4-a1fb-4087daaeabd3/scratch/deps/sysroot/usr/lib/x86_64-linux-gnu/libz.so.1
 )
 
 add_shader(vkgs src/shader/color.vert color_vert)

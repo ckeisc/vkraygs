@@ -3,6 +3,8 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <cstring>
+#include <algorithm>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -201,9 +203,24 @@ class Context::Impl {
       queue_infos.resize(1);
       queue_infos[0] = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
       queue_infos[0].queueFamilyIndex = graphics_queue_family_index_;
-      queue_infos[0].queueCount = 2;
+      // clamp to the family's actual queue count (e.g. Lavapipe exposes 1)
+      queue_infos[0].queueCount =
+          std::min(2u, queue_families[graphics_queue_family_index_].queueCount);
       queue_infos[0].pQueuePriorities = &queue_priorities[0];
     }
+
+    // query supported device extensions first: the external memory/semaphore
+    // fd extensions are optional (e.g. absent on software drivers like Lavapipe)
+    uint32_t device_ext_count = 0;
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &device_ext_count, nullptr);
+    std::vector<VkExtensionProperties> device_ext_props(device_ext_count);
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &device_ext_count, device_ext_props.data());
+    auto device_has_extension = [&](const char* name) {
+      for (const auto& prop : device_ext_props) {
+        if (strcmp(prop.extensionName, name) == 0) return true;
+      }
+      return false;
+    };
 
     std::vector<const char*> device_extensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -212,11 +229,17 @@ class Context::Impl {
         "VK_KHR_external_semaphore_win32",
 #elif __APPLE__
         "VK_KHR_portability_subset",
-#else
-        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 #endif
     };
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // optional: only used for external sharing (e.g. CUDA interop)
+    if (device_has_extension(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+      device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    }
+    if (device_has_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+      device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    }
+#endif
 
     VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_info.pNext = &features;
@@ -319,6 +342,7 @@ class Context::Impl {
   uint32_t transfer_queue_family_index() const noexcept { return transfer_queue_family_index_; }
   VkQueue graphics_queue() const noexcept { return graphics_queue_; }
   VkQueue transfer_queue() const noexcept { return transfer_queue_; }
+  std::mutex& queue_mutex() const noexcept { return queue_mutex_; }
   VmaAllocator allocator() const noexcept { return allocator_; }
   VkCommandPool command_pool() const noexcept { return command_pool_; }
   VkDescriptorPool descriptor_pool() const noexcept { return descriptor_pool_; }
@@ -357,6 +381,7 @@ class Context::Impl {
   uint32_t transfer_queue_family_index_ = 0;
   VkQueue graphics_queue_ = VK_NULL_HANDLE;
   VkQueue transfer_queue_ = VK_NULL_HANDLE;
+  mutable std::mutex queue_mutex_;
   VmaAllocator allocator_ = VK_NULL_HANDLE;
   VkCommandPool command_pool_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
@@ -395,6 +420,8 @@ uint32_t Context::transfer_queue_family_index() const { return impl_->transfer_q
 VkQueue Context::graphics_queue() const { return impl_->graphics_queue(); }
 
 VkQueue Context::transfer_queue() const { return impl_->transfer_queue(); }
+
+std::mutex& Context::queue_mutex() const { return impl_->queue_mutex(); }
 
 VmaAllocator Context::allocator() const { return impl_->allocator(); }
 

@@ -10,6 +10,98 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <vector>
+#include <functional>
+
+#include "load-spz.h"
+
+namespace {
+
+constexpr int kSpzStrideFloats = 59;
+
+// Loads an .spz file and converts it to the raw vertex layout that
+// parse_ply.comp consumes: 59 floats/vertex (pos, log-scale, quat,
+// sh, opacity-logit) plus a 60-entry offsets table.
+//
+// SPZ unpacking already yields log-scales, xyzw quaternions, logit
+// opacity and SH DC coefficients, matching the shader's expectations
+// (exp/sigmoid activations happen on the GPU), so the fields map
+// 1:1 onto the PLY loader's vertex record:
+//
+//   slots  0-2  = x,y,z            (positions)
+//   slots  3-5  = scale_x..z       (log scale)
+//   slots  6-9  = rot_1,rot_2,rot_3,rot_0 = qx,qy,qz,qw
+//   slots 10-25 = f_dc_0,f_rest_0..14
+//   slots 26-41 = f_dc_1,f_rest_15..29
+//   slots 42-57 = f_dc_2,f_rest_30..44
+//   slot  58    = opacity          (logit)
+//
+bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, std::vector<char>& buffer_,
+                  size_t* point_count, int* stride_bytes, const std::function<bool()>& cancelled,
+                  const std::function<void(uint32_t)>& progress) {
+  spz::GaussianCloud cloud = spz::loadSpz(path, spz::UnpackOptions());
+  
+  if (cloud.numPoints <= 0) {
+    fprintf(stderr, "[spz] failed to load %s\n", path.c_str());
+    return false;
+  }
+  const size_t n = static_cast<size_t>(cloud.numPoints);
+  const int sh_rest = cloud.sh.empty() ? 0 : static_cast<int>(cloud.sh.size() / (n * 3));  // 0,3,8,15,24
+  if (sh_rest > 15) {
+    fprintf(stderr, "[spz] SH degree > 3 (%d rest coeffs); truncating to 15\n", sh_rest);
+  }
+  const int sh_copy = std::min(sh_rest, 15);
+
+  for (int k = 0; k < kSpzStrideFloats; ++k) ply_offsets[k] = static_cast<uint32_t>(k);
+  ply_offsets[59] = static_cast<uint32_t>(kSpzStrideFloats);
+
+  buffer_.resize(n * kSpzStrideFloats * sizeof(float));
+  float* dst = reinterpret_cast<float*>(buffer_.data());
+
+  constexpr uint32_t chunk = 65536;
+  for (uint32_t start = 0; start < n; start += chunk) {
+    if (cancelled()) return false;
+    const uint32_t count = std::min<uint32_t>(chunk, static_cast<uint32_t>(n - start));
+    for (uint32_t j = 0; j < count; ++j) {
+      const size_t i = start + j;
+      float* v = dst + i * kSpzStrideFloats;
+      v[0] = cloud.positions[3 * i + 0];
+      v[1] = cloud.positions[3 * i + 1];
+      v[2] = cloud.positions[3 * i + 2];
+      v[3] = cloud.scales[3 * i + 0];
+      v[4] = cloud.scales[3 * i + 1];
+      v[5] = cloud.scales[3 * i + 2];
+      v[6] = cloud.rotations[4 * i + 0];  // qx -> rot_1
+      v[7] = cloud.rotations[4 * i + 1];  // qy -> rot_2
+      v[8] = cloud.rotations[4 * i + 2];  // qz -> rot_3
+      v[9] = cloud.rotations[4 * i + 3];  // qw -> rot_0
+      v[10] = cloud.colors[3 * i + 0];    // f_dc_0
+      v[26] = cloud.colors[3 * i + 1];    // f_dc_1
+      v[42] = cloud.colors[3 * i + 2];    // f_dc_2
+      for (int c = 0; c < 15; ++c) {
+        float r = 0.f, g = 0.f, b = 0.f;
+        if (c < sh_copy) {
+          const size_t s = (i * static_cast<size_t>(sh_rest) + static_cast<size_t>(c)) * 3;
+          r = cloud.sh[s + 0];
+          g = cloud.sh[s + 1];
+          b = cloud.sh[s + 2];
+        }
+        v[11 + c] = r;
+        v[27 + c] = g;
+        v[43 + c] = b;
+      }
+      v[58] = cloud.alphas[i];  // logit; sigmoid applied on GPU
+    }
+    progress(start + count);
+  }
+
+  *point_count = n;
+  *stride_bytes = kSpzStrideFloats * static_cast<int>(sizeof(float));
+  
+  return true;
+}
+
+}  // namespace
 
 #include <vulkan/vulkan.h>
 #include "vk_mem_alloc.h"
@@ -50,42 +142,104 @@ class SplatLoadThread::Impl {
 
         cancel_ = false;
 
-        std::ifstream in(ply_filepath, std::ios::binary);
+        const bool is_spz = ply_filepath.size() >= 4 &&
+                            ply_filepath.compare(ply_filepath.size() - 4, 4, ".spz") == 0;
 
-        // parse header
-        std::unordered_map<std::string, int> offsets;
-        int offset = 0;
+        std::vector<uint32_t> ply_offsets(60);
+        int offset = 0;  // vertex stride in bytes
         size_t point_count = 0;
-        std::string line;
-        while (std::getline(in, line)) {
-          if (line == "end_header") break;
+        std::unordered_map<std::string, int> offsets;
 
-          std::istringstream iss(line);
-          std::string word;
-          iss >> word;
-          if (word == "property") {
-            int size = 0;
-            std::string type, property;
-            iss >> type >> property;
-            if (type == "float") {
-              size = 4;
-            }
-            offsets[property] = offset;
-            offset += size;
-          } else if (word == "element") {
-            std::string type;
-            size_t count;
-            iss >> type >> count;
-            if (type == "vertex") {
-              point_count = count;
+        if (is_spz) {
+          // native .spz: decode and synthesize the PLY vertex layout
+          if (!LoadSpzAsPly(
+                  ply_filepath, ply_offsets, buffer_, &point_count, &offset,
+                  [this] { return terminate_ || cancel_; },
+                  [this](uint32_t loaded) {
+                    std::unique_lock<std::mutex> guard{mutex_};
+                    loaded_point_count_ = loaded;
+                  })) {
+            continue;
+          }
+          {
+            std::unique_lock<std::mutex> guard{mutex_};
+            total_point_count_ = point_count;
+          }
+        } else {
+          std::ifstream in(ply_filepath, std::ios::binary);
+
+          // parse header
+          std::string line;
+          while (std::getline(in, line)) {
+            if (line == "end_header") break;
+
+            std::istringstream iss(line);
+            std::string word;
+            iss >> word;
+            if (word == "property") {
+              int size = 0;
+              std::string type, property;
+              iss >> type >> property;
+              if (type == "float") {
+                size = 4;
+              }
+              offsets[property] = offset;
+              offset += size;
+            } else if (word == "element") {
+              std::string type;
+              size_t count;
+              iss >> type >> count;
+              if (type == "vertex") {
+                point_count = count;
+              }
             }
           }
-        }
 
-        // update total point count
-        {
-          std::unique_lock<std::mutex> guard{mutex_};
-          total_point_count_ = point_count;
+          // update total point count
+          {
+            std::unique_lock<std::mutex> guard{mutex_};
+            total_point_count_ = point_count;
+          }
+
+          // ply offsets
+          ply_offsets[0] = offsets["x"] / 4;
+          ply_offsets[1] = offsets["y"] / 4;
+          ply_offsets[2] = offsets["z"] / 4;
+          ply_offsets[3] = offsets["scale_0"] / 4;
+          ply_offsets[4] = offsets["scale_1"] / 4;
+          ply_offsets[5] = offsets["scale_2"] / 4;
+          ply_offsets[6] = offsets["rot_1"] / 4;  // qx
+          ply_offsets[7] = offsets["rot_2"] / 4;  // qy
+          ply_offsets[8] = offsets["rot_3"] / 4;  // qz
+          ply_offsets[9] = offsets["rot_0"] / 4;  // qw
+          ply_offsets[10 + 0] = offsets["f_dc_0"] / 4;
+          ply_offsets[10 + 16] = offsets["f_dc_1"] / 4;
+          ply_offsets[10 + 32] = offsets["f_dc_2"] / 4;
+          for (int i = 0; i < 15; ++i) {
+            ply_offsets[10 + 1 + i] = offsets["f_rest_" + std::to_string(i)] / 4;
+            ply_offsets[10 + 17 + i] = offsets["f_rest_" + std::to_string(15 + i)] / 4;
+            ply_offsets[10 + 33 + i] = offsets["f_rest_" + std::to_string(30 + i)] / 4;
+          }
+          ply_offsets[58] = offsets["opacity"] / 4;
+          ply_offsets[59] = offset / 4;
+
+          // read all binary data
+          buffer_.resize(offset * point_count);
+
+          constexpr uint32_t chunk_size = 65536;
+          for (uint32_t start = 0; start < point_count; start += chunk_size) {
+            if (terminate_ || cancel_) break;
+
+            auto chunk_point_count = std::min<uint32_t>(chunk_size, point_count - start);
+            in.read(buffer_.data() + offset * start, offset * chunk_point_count);
+
+            {
+              std::unique_lock<std::mutex> guard{mutex_};
+              loaded_point_count_ = start + chunk_point_count;
+            }
+          }
+
+          if (terminate_) break;
         }
 
         // assuming all properties are float
@@ -111,46 +265,6 @@ class SplatLoadThread::Impl {
         auto ply_buffer =
             vk::Buffer(context_, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
-        // ply offsets
-        std::vector<uint32_t> ply_offsets(60);
-        ply_offsets[0] = offsets["x"] / 4;
-        ply_offsets[1] = offsets["y"] / 4;
-        ply_offsets[2] = offsets["z"] / 4;
-        ply_offsets[3] = offsets["scale_0"] / 4;
-        ply_offsets[4] = offsets["scale_1"] / 4;
-        ply_offsets[5] = offsets["scale_2"] / 4;
-        ply_offsets[6] = offsets["rot_1"] / 4;  // qx
-        ply_offsets[7] = offsets["rot_2"] / 4;  // qy
-        ply_offsets[8] = offsets["rot_3"] / 4;  // qz
-        ply_offsets[9] = offsets["rot_0"] / 4;  // qw
-        ply_offsets[10 + 0] = offsets["f_dc_0"] / 4;
-        ply_offsets[10 + 16] = offsets["f_dc_1"] / 4;
-        ply_offsets[10 + 32] = offsets["f_dc_2"] / 4;
-        for (int i = 0; i < 15; ++i) {
-          ply_offsets[10 + 1 + i] = offsets["f_rest_" + std::to_string(i)] / 4;
-          ply_offsets[10 + 17 + i] = offsets["f_rest_" + std::to_string(15 + i)] / 4;
-          ply_offsets[10 + 33 + i] = offsets["f_rest_" + std::to_string(30 + i)] / 4;
-        }
-        ply_offsets[58] = offsets["opacity"] / 4;
-        ply_offsets[59] = offset / 4;
-
-        // read all binary data
-        buffer_.resize(offset * point_count);
-
-        constexpr uint32_t chunk_size = 65536;
-        for (uint32_t start = 0; start < point_count; start += chunk_size) {
-          if (terminate_ || cancel_) break;
-
-          auto chunk_point_count = std::min<uint32_t>(chunk_size, point_count - start);
-          in.read(buffer_.data() + offset * start, offset * chunk_point_count);
-
-          {
-            std::unique_lock<std::mutex> guard{mutex_};
-            loaded_point_count_ = start + chunk_point_count;
-          }
-        }
-
-        if (terminate_) break;
 
         // copy to staging buffer
         {
@@ -183,15 +297,20 @@ class SplatLoadThread::Impl {
 
         vkEndCommandBuffer(cb);
 
-        // submit
+        // submit (serialized: transfer may share the physical queue with graphics)
         {
+          
           VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
           submit_info.commandBufferCount = 1;
           submit_info.pCommandBuffers = &cb;
-          vkQueueSubmit(context_.transfer_queue(), 1, &submit_info, fence_);
+          {
+            std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+            vkQueueSubmit(context_.transfer_queue(), 1, &submit_info, fence_);
+          }
 
           vkWaitForFences(context_.device(), 1, &fence_, VK_TRUE, UINT64_MAX);
           vkResetFences(context_.device(), 1, &fence_);
+          
         }
 
         // update loaded point count
