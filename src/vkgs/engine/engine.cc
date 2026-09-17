@@ -632,10 +632,6 @@ class Engine::Impl {
     splat_load_thread_.SetCullMasks(masks_path, view_index);
   }
 
-  void SetOpacityBias(float bias) {
-    splat_load_thread_.SetOpacityBias(bias);
-  }
-
   void SetDcOnly(bool dc_only) {
     splat_load_thread_.SetDcOnly(dc_only);
   }
@@ -1956,10 +1952,6 @@ void Engine::SetBatchOutput(const std::string& dir, const std::string& prefix) {
 
 void Engine::SetCullMasks(const std::string& masks_path, int view_index) {
   impl_->SetCullMasks(masks_path, view_index);
-}
-
-void Engine::SetOpacityBias(float bias) {
-  impl_->SetOpacityBias(bias);
 }
 
 void Engine::SetDcOnly(bool dc_only) {

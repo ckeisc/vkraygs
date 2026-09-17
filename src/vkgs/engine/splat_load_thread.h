@@ -39,8 +39,6 @@ class SplatLoadThread {
   void SetCullMasks(const std::string& masks_path, int view_index);
 
   // Logit-space opacity bias applied at load time.
-  void SetOpacityBias(float bias);
-
   void SetDcOnly(bool dc_only);
 
   Progress GetProgress();
