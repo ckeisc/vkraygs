@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -64,7 +65,26 @@ class Context::Impl {
         VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
     messenger_info.pfnUserCallback = DebugCallback;
 
-    std::vector<const char*> layers = {"VK_LAYER_KHRONOS_validation"};
+    // Enable the validation layer only if it is actually installed.
+    // Minimal/portable SDK setups (headers + loader only) do not ship it,
+    // and requesting a missing layer makes vkCreateInstance fail.
+    std::vector<const char*> layers;
+    {
+      uint32_t layer_count = 0;
+      vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+      std::vector<VkLayerProperties> available(layer_count);
+      vkEnumerateInstanceLayerProperties(&layer_count, available.data());
+      for (const auto& props : available) {
+        if (std::strcmp(props.layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+          layers.push_back("VK_LAYER_KHRONOS_validation");
+          break;
+        }
+      }
+      if (layers.empty()) {
+        std::cerr << "[vkgs] VK_LAYER_KHRONOS_validation not found, running without validation"
+                  << std::endl;
+      }
+    }
 
     uint32_t count;
     const char** glfw_extensions = glfwGetRequiredInstanceExtensions(&count);
@@ -77,11 +97,13 @@ class Context::Impl {
     instance_info.pNext = &messenger_info;
     instance_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     instance_info.pApplicationInfo = &application_info;
-    instance_info.enabledLayerCount = layers.size();
+    instance_info.enabledLayerCount = static_cast<uint32_t>(layers.size());
     instance_info.ppEnabledLayerNames = layers.data();
-    instance_info.enabledExtensionCount = instance_extensions.size();
+    instance_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
     instance_info.ppEnabledExtensionNames = instance_extensions.data();
-    vkCreateInstance(&instance_info, NULL, &instance_);
+    if (vkCreateInstance(&instance_info, NULL, &instance_) != VK_SUCCESS) {
+      throw std::runtime_error("vkCreateInstance failed");
+    }
 
     CreateDebugUtilsMessengerEXT(instance_, &messenger_info, NULL, &messenger_);
 
