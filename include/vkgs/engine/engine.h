@@ -30,10 +30,15 @@ class Engine {
 
   // Visibility-cluster occlusion culling (Hyperscape od_cluster_masks.bin).
   // masks_path: per-splat uint64 visibility bitmasks; view_index: 0-63 viewpoint.
+  // Static CPU mode: filters splats at load time (for batch rendering).
   void SetCullMasks(const std::string& masks_path, int view_index);
 
-  // Logit-space opacity bias (added to SPZ alpha logits before sigmoid).
-  // Positive values boost opacity to reduce background bleed-through.
+  // Dynamic GPU mode: also provide the cluster centroids JSON
+  // (od_cluster_centroids, 64 viewpoint positions). The viewer then culls in the
+  // projection shader using the union of the 3 nearest viewpoints per frame.
+  // Requires SetCullMasks to have been called with the masks path.
+  void SetCullCentroids(const std::string& centroids_path);
+
   // Debug: ignore SH view-dependent terms, use DC only.
   void SetDcOnly(bool dc_only);
 

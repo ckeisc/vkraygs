@@ -63,7 +63,11 @@ int main(int argc, char** argv) {
   parser.add_argument("--cull-view")
       .default_value(-1)
       .scan<'i', int>()
-      .help("viewpoint index (0-63) for --cull-masks; nearest to camera");
+      .help("viewpoint index (0-63) for --cull-masks; static CPU culling (batch mode)");
+  parser.add_argument("--cull-centroids")
+      .default_value(std::string(""))
+      .help("cluster centroids JSON (Hyperscape od_cluster_centroids) for dynamic GPU culling: "
+            "union of 3 nearest viewpoints per frame (interactive mode)");
   parser.add_argument("--dc-only")
       .default_value(true)
       .implicit_value(true)
@@ -110,10 +114,17 @@ int main(int argc, char** argv) {
     }
 
     const std::string cull_masks = parser.get<std::string>("cull-masks");
+    const std::string cull_centroids = parser.get<std::string>("cull-centroids");
     const int cull_view = parser.get<int>("cull-view");
-    if (!cull_masks.empty() && cull_view >= 0) {
+    if (!cull_masks.empty() && !cull_centroids.empty()) {
+      // Dynamic GPU culling: no CPU filtering (view_index=-1), masks go to GPU.
+      engine.SetCullMasks(cull_masks, -1);
+      engine.SetCullCentroids(cull_centroids);
+      std::cout << "culling: dynamic GPU (union of 3 nearest), masks=" << cull_masks
+                << " centroids=" << cull_centroids << std::endl;
+    } else if (!cull_masks.empty() && cull_view >= 0) {
       engine.SetCullMasks(cull_masks, cull_view);
-      std::cout << "culling: masks=" << cull_masks << " view=" << cull_view << std::endl;
+      std::cout << "culling: static CPU, masks=" << cull_masks << " view=" << cull_view << std::endl;
     }
 
     // DC-only is the default (Hyperscape SPZ uses non-standard SH convention).

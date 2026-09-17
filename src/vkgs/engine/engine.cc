@@ -15,6 +15,9 @@
 #include <array>
 #include <cstdio>
 #include <vector>
+#include <cstdint>
+#include <fstream>
+#include <limits>
 
 #include <vulkan/vulkan.h>
 
@@ -103,11 +106,18 @@ struct Resolution {
 };
 
 struct SplatPushConstants {
-  SplatPushConstants():mip_bias(0.1f), log_p_min(-4.0f), mip_modulation(true) {}
+  SplatPushConstants():mip_bias(0.1f), log_p_min(-4.0f), mip_modulation(true),
+    cull_view0(0), cull_view1(0), cull_view2(0), cull_mode(0), cull_words_per_mask(0) {}
   glm::mat4 model;
   float mip_bias;
   float log_p_min;
   bool mip_modulation;
+  // Dynamic GPU visibility culling: 3 nearest viewpoint indices (union).
+  int cull_view0;
+  int cull_view1;
+  int cull_view2;
+  int cull_mode;  // 0 = off, 1 = dynamic
+  uint32_t cull_words_per_mask;
 };
 
 std::vector<Resolution> preset_resolutions = {
@@ -167,7 +177,7 @@ class Engine::Impl {
 
     {
       vk::DescriptorLayoutCreateInfo descriptor_layout_info = {};
-      descriptor_layout_info.bindings.resize(5);
+      descriptor_layout_info.bindings.resize(6);
       descriptor_layout_info.bindings[0] = {};
       descriptor_layout_info.bindings[0].binding = 0;
       descriptor_layout_info.bindings[0].descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -192,6 +202,11 @@ class Engine::Impl {
       descriptor_layout_info.bindings[4].binding = 4;
       descriptor_layout_info.bindings[4].descriptor_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       descriptor_layout_info.bindings[4].stage_flags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+      descriptor_layout_info.bindings[5] = {};
+      descriptor_layout_info.bindings[5].binding = 5;
+      descriptor_layout_info.bindings[5].descriptor_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      descriptor_layout_info.bindings[5].stage_flags = VK_SHADER_STAGE_COMPUTE_BIT;
 
       gaussian_descriptor_layout_ = vk::DescriptorLayout(context_, descriptor_layout_info);
     }
@@ -629,11 +644,159 @@ class Engine::Impl {
   }
 
   void SetCullMasks(const std::string& masks_path, int view_index) {
+    cull_masks_path_ = masks_path;  // kept for dynamic GPU culling (even if view_index < 0)
     splat_load_thread_.SetCullMasks(masks_path, view_index);
+  }
+
+  void SetCullCentroids(const std::string& centroids_path) {
+    cull_centroids_path_ = centroids_path;
   }
 
   void SetDcOnly(bool dc_only) {
     splat_load_thread_.SetDcOnly(dc_only);
+  }
+
+  // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
+  static bool LoadCullCentroids(const std::string& path, std::vector<glm::vec3>* out) {
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    const size_t views_key = content.find("\"views\"");
+    if (views_key == std::string::npos) return false;
+    const size_t arr_begin = content.find('[', views_key);
+    if (arr_begin == std::string::npos) return false;
+
+    // Find matching closing bracket for the views array.
+    int depth = 0;
+    size_t arr_end = std::string::npos;
+    for (size_t i = arr_begin; i < content.size(); ++i) {
+      if (content[i] == '[') ++depth;
+      else if (content[i] == ']') {
+        if (--depth == 0) { arr_end = i; break; }
+      }
+    }
+    if (arr_end == std::string::npos) return false;
+
+    // Within the views array, each [x,y,z] is a centroid.
+    std::vector<glm::vec3> centroids;
+    size_t pos = arr_begin + 1;
+    while (pos < arr_end && centroids.size() < 64) {
+      const size_t vb = content.find('[', pos);
+      if (vb == std::string::npos || vb >= arr_end) break;
+      const size_t ve = content.find(']', vb);
+      if (ve == std::string::npos || ve > arr_end) break;
+      std::string nums = content.substr(vb + 1, ve - vb - 1);
+      for (char& c : nums) if (c == ',') c = ' ';
+      float x, y, z;
+      if (std::sscanf(nums.c_str(), "%f %f %f", &x, &y, &z) == 3) {
+        centroids.emplace_back(x, y, z);
+      }
+      pos = ve + 1;
+    }
+
+    *out = std::move(centroids);
+    return !out->empty();
+  }
+
+  // One-time setup for dynamic GPU visibility culling: load per-splat uint64
+  // masks, transpose to (num_views, words_per_mask) uint32 for the shader,
+  // parse centroid positions, upload to a GPU storage buffer.
+  void InitDynamicCulling() {
+    if (cull_masks_path_.empty() || cull_centroids_path_.empty()) return;
+
+    if (!LoadCullCentroids(cull_centroids_path_, &cull_centroids_)) {
+      fprintf(stderr, "[cull] warning: could not parse centroids %s\n", cull_centroids_path_.c_str());
+      return;
+    }
+    size_t num_views = cull_centroids_.size();
+    if (num_views > 64) {
+      fprintf(stderr, "[cull] warning: %zu views > 64, truncating\n", num_views);
+      cull_centroids_.resize(64);
+      num_views = 64;
+    }
+    fprintf(stderr, "[cull] loaded %zu viewpoints from %s\n", num_views, cull_centroids_path_.c_str());
+
+    std::ifstream mf(cull_masks_path_, std::ios::binary | std::ios::ate);
+    if (!mf) {
+      fprintf(stderr, "[cull] warning: could not open masks %s\n", cull_masks_path_.c_str());
+      return;
+    }
+    const size_t file_size = static_cast<size_t>(mf.tellg());
+    mf.seekg(0);
+    const size_t num_splats = file_size / sizeof(uint64_t);
+    std::vector<uint64_t> masks(num_splats);
+    mf.read(reinterpret_cast<char*>(masks.data()), num_splats * sizeof(uint64_t));
+    if (!mf) {
+      fprintf(stderr, "[cull] warning: could not read masks %s\n", cull_masks_path_.c_str());
+      return;
+    }
+
+    cull_words_per_mask_ = static_cast<uint32_t>((num_splats + 31) / 32);
+    std::vector<uint32_t> transposed(num_views * cull_words_per_mask_, 0);
+    for (size_t i = 0; i < num_splats; ++i) {
+      const uint64_t m = masks[i];
+      if (!m) continue;
+      const uint32_t word = static_cast<uint32_t>(i / 32);
+      const uint32_t bit = 1u << (i % 32);
+      for (size_t v = 0; v < num_views; ++v) {
+        if (m & (1ULL << v)) transposed[v * cull_words_per_mask_ + word] |= bit;
+      }
+    }
+    fprintf(stderr, "[cull] transposed %zu splats x %zu views -> %u words/view (%zu bytes)\n",
+            num_splats, num_views, cull_words_per_mask_, transposed.size() * sizeof(uint32_t));
+
+    cull_masks_buffer_ = vk::Buffer(context_, transposed.size() * sizeof(uint32_t),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+    VkCommandBufferAllocateInfo cb_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cb_info.commandPool = context_.command_pool();
+    cb_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cb_info.commandBufferCount = 1;
+    VkCommandBuffer cb;
+    vkAllocateCommandBuffers(context_.device(), &cb_info, &cb);
+    VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &begin_info);
+    cull_masks_buffer_.FromCpu(cb, transposed);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cb;
+    {
+      std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+      vkQueueSubmit(context_.graphics_queue(), 1, &submit, VK_NULL_HANDLE);
+      vkQueueWaitIdle(context_.graphics_queue());
+    }
+    vkFreeCommandBuffers(context_.device(), context_.command_pool(), 1, &cb);
+
+    splat_push_constants_.cull_words_per_mask = cull_words_per_mask_;
+    splat_push_constants_.cull_mode = 1;
+    cull_dynamic_ready_ = true;
+    fprintf(stderr, "[cull] dynamic GPU culling ready\n");
+  }
+
+  // Find the 3 nearest centroid indices to the given eye position.
+  void FindNearestCullViews(const glm::vec3& eye, int* v0, int* v1, int* v2) const {
+    int best0 = 0, best1 = 0, best2 = 0;
+    float d0 = std::numeric_limits<float>::max();
+    float d1 = std::numeric_limits<float>::max();
+    float d2 = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < cull_centroids_.size(); ++i) {
+      const glm::vec3 d = cull_centroids_[i] - eye;
+      const float dist2 = glm::dot(d, d);
+      if (dist2 < d0) {
+        d2 = d1; best2 = best1;
+        d1 = d0; best1 = best0;
+        d0 = dist2; best0 = static_cast<int>(i);
+      } else if (dist2 < d1) {
+        d2 = d1; best2 = best1;
+        d1 = dist2; best1 = static_cast<int>(i);
+      } else if (dist2 < d2) {
+        d2 = dist2; best2 = static_cast<int>(i);
+      }
+    }
+    *v0 = best0; *v1 = best1; *v2 = best2;
   }
 
   void LoadSplatsAsync(const std::string& ply_filepath) {
@@ -642,6 +805,9 @@ class Engine::Impl {
   }
 
   void Run() {
+    // Dynamic GPU visibility culling: upload transposed masks once before rendering.
+    InitDynamicCulling();
+
     viewer::WindowCreateInfo window_info = {};
     window_info.instance = context_.instance();
     window_info.physical_device = context_.physical_device();
@@ -1188,6 +1354,15 @@ class Engine::Impl {
     }
     camera_buffer_[frame_index].screen_size = {camera_.width(), camera_.height()};
 
+    // Dynamic GPU culling: 3 nearest viewpoints to the camera eye (union = conservative).
+    if (cull_dynamic_ready_) {
+      int v0, v1, v2;
+      FindNearestCullViews(camera_buffer_[frame_index].camera_position, &v0, &v1, &v2);
+      splat_push_constants_.cull_view0 = v0;
+      splat_push_constants_.cull_view1 = v1;
+      splat_push_constants_.cull_view2 = v2;
+    }
+
     // batch capture state machine: arm once the loaded splat count is stable
     batch_armed_ = false;
     if (batch_mode_ && batch_index_ < batch_views_.size()) {
@@ -1249,6 +1424,9 @@ class Engine::Impl {
         descriptors_[frame_index].gaussian.Update(3, splat_storage_.opacity, 0,
                                                   loaded_point_count_ * 1 * sizeof(float));
         descriptors_[frame_index].gaussian.Update(4, splat_storage_.sh, 0, loaded_point_count_ * 48 * sizeof(uint16_t));
+        if (cull_dynamic_ready_) {
+          descriptors_[frame_index].gaussian.Update(5, cull_masks_buffer_, 0, cull_masks_buffer_.size());
+        }
 
         descriptors_[frame_index].splat_instance.Update(1, splat_storage_.instance, 0,
                                                         loaded_point_count_ * 14 * sizeof(float));
@@ -1796,6 +1974,14 @@ class Engine::Impl {
   ModelType model_type_ = ModelType::RayGS;
   SplatPushConstants splat_push_constants_;
 
+  // Dynamic GPU visibility culling (Hyperscape cluster masks + centroids).
+  std::string cull_masks_path_;       // cluster_masks.bin (per-splat uint64)
+  std::string cull_centroids_path_;   // cluster_centroids.json (view positions)
+  std::vector<glm::vec3> cull_centroids_;
+  vk::Buffer cull_masks_buffer_;      // transposed: (num_views, words_per_mask) uint32
+  uint32_t cull_words_per_mask_ = 0;
+  bool cull_dynamic_ready_ = false;
+
   Camera camera_;
 
   vk::Context context_;
@@ -1954,6 +2140,10 @@ void Engine::SetBatchOutput(const std::string& dir, const std::string& prefix) {
 
 void Engine::SetCullMasks(const std::string& masks_path, int view_index) {
   impl_->SetCullMasks(masks_path, view_index);
+}
+
+void Engine::SetCullCentroids(const std::string& centroids_path) {
+  impl_->SetCullCentroids(centroids_path);
 }
 
 void Engine::SetDcOnly(bool dc_only) {
