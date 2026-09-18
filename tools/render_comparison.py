@@ -14,7 +14,7 @@ comparison metrics:
 Usage (Windows Command Prompt):
     python tools\\render_comparison.py ^
         --spz path\\to\\scan.spz ^
-        --poses path\\to\\scan_camera_poses.bin ^
+        --poses path\\to\\scan_camera_poses ^
         --viewer build\\Release\\vkgs_viewer.exe ^
         --outdir comparison_out
 
@@ -39,7 +39,7 @@ from PIL import Image
 # ----------------------------------------------------------------------------
 
 def load_colmap_poses(poses_path):
-    """Load Hyperscape camera_poses file (JSON content, may have .bin ext).
+    """Load Hyperscape camera_poses file (JSON content, no extension).
 
     Returns (poses_c2w, intrinsics) where poses_c2w is (N,4,4) float64
     camera-to-world matrices.

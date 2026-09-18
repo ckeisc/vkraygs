@@ -2,7 +2,7 @@
 REM render_comparison.bat - Windows wrapper for render_comparison.py
 REM
 REM Usage:
-REM   tools\render_comparison.bat C:\path\to\scan.spz C:\path\to\scan_camera_poses.bin C:\path\to\comparison_out
+REM   tools\render_comparison.bat C:\path\to\scan.spz C:\path\to\scan_camera_poses C:\path\to\comparison_out
 REM
 REM Assumes vkgs_viewer.exe was built to build\Release\vkgs_viewer.exe
 REM (run the CMake build first). Requires Python 3.8+ with numpy and Pillow:
@@ -11,7 +11,7 @@ REM   pip install numpy Pillow
 setlocal
 if "%~3"=="" (
     echo Usage: %~nx0 SPZ_FILE POSES_FILE OUTDIR
-    echo Example: %~nx0 C:\scans\garage.spz C:\scans\garage_camera_poses.bin C:\scans\out
+    echo Example: %~nx0 C:\scans\garage.spz C:\scans\garage_camera_poses C:\scans\out
     exit /b 1
 )
 
