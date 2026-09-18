@@ -13,3 +13,4 @@ __pycache__
 
 /imgui.ini
 /pipeline_cache.bin
+/third_party/VulkanSDK/
