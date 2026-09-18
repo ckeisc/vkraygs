@@ -15,7 +15,7 @@ Usage (Windows):
         --outdir hole_fill_out
 
 Variants rendered (GS kernel):
-    baseline, inflate-1.3, densify, gamma-2.0, combined
+    baseline (inflate 1.0), inflate-1.3, inflate-1.5
 """
 
 import argparse
@@ -37,11 +37,9 @@ except ImportError:
     sys.exit("needs Pillow and numpy: pip install pillow numpy")
 
 VARIANTS = [
-    ("baseline", []),
+    ("baseline", ["--inflate", "1.0"]),
     ("inflate-1.3", ["--inflate", "1.3"]),
-    ("densify", ["--densify"]),
-    ("gamma-2.0", ["--opacity-gamma", "2.0"]),
-    ("combined", ["--inflate", "1.3", "--densify", "--opacity-gamma", "2.0"]),
+    ("inflate-1.5", ["--inflate", "1.5"]),
 ]
 
 

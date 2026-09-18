@@ -77,8 +77,8 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
     }
   }
 
-  // Hole-filling: process the decoded SPZ cloud in memory (inflate volumes,
-  // densify gaps, ramp opacity) before building the GPU vertex buffer.
+  // Hole-filling: inflate the decoded SPZ cloud's Gaussian volumes in memory
+  // before building the GPU vertex buffer.
   if (hole_fill.enabled()) {
     vkgs::ApplyHoleFill(cloud, hole_fill);
   }
