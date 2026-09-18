@@ -10,13 +10,12 @@ Hyperscape flyby video (every 90th frame, 8 frames).
 **Bigger 3D volumes** — Hyperscape may render larger effective volumes per
 primitive (not just 2D ellipse splats), closing gaps between neighbors.
 Implemented as `--inflate F` (default 1.3): multiplies every Gaussian's 3D
-sigma by F (applied as `+= log(F)` on the SPZ log-scales, in memory after
-decode). `1.0` disables it.
+sigma by F, applied GPU-side in `parse_ply.comp` as `s = exp(s) * inflate`.
+`1.0` disables it.
 
-Runs in `ApplyHoleFill()` (`src/vkgs/engine/splat_hole_fill.cc`) on the
-decoded `spz::GaussianCloud`, after optional visibility-cluster culling and
-before the GPU vertex buffer is built. Nothing is written to disk; the scene
-is regenerated in memory on every load.
+The factor is a push constant, so it can be adjusted live: **PageUp/PageDown**
+change it by ±0.05 and re-dispatch `parse_ply` from the persistent PLY source
+buffer. Nothing is written to disk.
 
 ## Usage
 
@@ -43,3 +42,5 @@ the flyby frames is the real metric.
 - Densification and opacity-gamma variants were tested and removed (2026-09-18):
   individual A/B showed inflate doing all the work; the other two added
   nothing on top.
+- `--opacity-bias` removed (2026-09-18): didn't help; PageUp/PageDown now
+  control inflate instead.

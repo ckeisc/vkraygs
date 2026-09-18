@@ -15,8 +15,6 @@
 
 #include "load-spz.h"
 
-#include "vkgs/engine/splat_hole_fill.h"
-
 namespace {
 
 constexpr int kSpzStrideFloats = 59;
@@ -42,7 +40,7 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
                   size_t* point_count, int* stride_bytes, const std::function<bool()>& cancelled,
                   const std::function<void(uint32_t)>& progress,
                   const std::string& cull_masks_path = "", int cull_view_index = -1,
-                  bool dc_only = false, const vkgs::HoleFillParams& hole_fill = vkgs::HoleFillParams()) {
+                  bool dc_only = false) {
   spz::GaussianCloud cloud = spz::loadSpz(path, spz::UnpackOptions());
 
   // Optional visibility-cluster culling (Hyperscape od_cluster_masks).
@@ -75,12 +73,6 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
     } else {
       fprintf(stderr, "[spz] warning: could not read cull masks %s\n", cull_masks_path.c_str());
     }
-  }
-
-  // Hole-filling: inflate the decoded SPZ cloud's Gaussian volumes in memory
-  // before building the GPU vertex buffer.
-  if (hole_fill.enabled()) {
-    vkgs::ApplyHoleFill(cloud, hole_fill);
   }
 
   if (cloud.numPoints <= 0) {
@@ -201,7 +193,7 @@ class SplatLoadThread::Impl {
                     std::unique_lock<std::mutex> guard{mutex_};
                     loaded_point_count_ = loaded;
                   },
-                  cull_masks_path_, cull_view_index_, dc_only_, hole_fill_)) {
+                  cull_masks_path_, cull_view_index_, dc_only_)) {
             continue;
           }
           {
@@ -402,11 +394,6 @@ class SplatLoadThread::Impl {
     dc_only_ = dc_only;
   }
 
-  void SetHoleFill(const HoleFillParams& params) {
-    std::unique_lock<std::mutex> guard{mutex_};
-    hole_fill_ = params;
-  }
-
   Progress GetProgress() {
     Progress result;
     std::unique_lock<std::mutex> guard{mutex_};
@@ -435,7 +422,6 @@ class SplatLoadThread::Impl {
   std::string cull_masks_path_;
   int cull_view_index_ = -1;
   bool dc_only_ = false;
-  HoleFillParams hole_fill_;
 
   uint32_t total_point_count_ = 0;
   uint32_t loaded_point_count_ = 0;
@@ -468,10 +454,6 @@ void SplatLoadThread::SetCullMasks(const std::string& masks_path, int view_index
 
 void SplatLoadThread::SetDcOnly(bool dc_only) {
   impl_->SetDcOnly(dc_only);
-}
-
-void SplatLoadThread::SetHoleFill(const HoleFillParams& params) {
-  impl_->SetHoleFill(params);
 }
 
 SplatLoadThread::Progress SplatLoadThread::GetProgress() { return impl_->GetProgress(); }

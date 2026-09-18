@@ -76,10 +76,6 @@ int main(int argc, char** argv) {
       .default_value(false)
       .implicit_value(true)
       .help("enable full SH evaluation (for standard 3DGS SPZ files)");
-  parser.add_argument("--opacity-bias")
-      .default_value(0.0f)
-      .scan<'g', float>()
-      .help("logit-space opacity boost for Hyperscape SPZ (e.g. 1.0); compensates for rasterizer vs ray-marcher accumulation");
   parser.add_argument("--alpha-scale")
       .default_value(1.0f)
       .scan<'g', float>()
@@ -180,12 +176,6 @@ int main(int argc, char** argv) {
       std::cout << "dc-only: ignoring SH view-dependent terms (Hyperscape mode)" << std::endl;
     }
 
-    const float opacity_bias = parser.get<float>("opacity-bias");
-    if (opacity_bias != 0.0f) {
-      engine.SetOpacityBias(opacity_bias);
-      std::cout << "opacity bias: " << opacity_bias << " (logit space)" << std::endl;
-    }
-
     const float alpha_scale = parser.get<float>("alpha-scale");
     const float alpha_bias = parser.get<float>("alpha-bias");
     if (alpha_scale != 1.0f || alpha_bias != 0.0f) {
@@ -193,12 +183,9 @@ int main(int argc, char** argv) {
       std::cout << "alpha correction: scale=" << alpha_scale << " bias=" << alpha_bias << std::endl;
     }
 
-    vkgs::HoleFillParams hole_fill;
-    hole_fill.inflate = parser.get<float>("inflate");
-    if (hole_fill.enabled()) {
-      engine.SetHoleFill(hole_fill);
-      std::cout << "hole-fill: inflate=" << hole_fill.inflate << std::endl;
-    }
+    const float inflate = parser.get<float>("inflate");
+    engine.SetInflate(inflate);
+    std::cout << "hole-fill: inflate=" << inflate << " (PageUp/PageDown adjust ±0.05)" << std::endl;
 
     if (parser.is_used("input")) {
       auto ply_filepath = parser.get<std::string>("input");

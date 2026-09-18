@@ -664,20 +664,16 @@ class Engine::Impl {
     splat_load_thread_.SetDcOnly(dc_only);
   }
 
-  void SetHoleFill(const HoleFillParams& params) {
-    splat_load_thread_.SetHoleFill(params);
-  }
-
-  void SetOpacityBias(float bias) {
-    opacity_bias_ = bias;
-    opacity_bias_dirty_ = true;
+  void SetInflate(float factor) {
+    inflate_ = factor;
+    inflate_dirty_ = true;
   }
 
   // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
   void SetAlphaCorrection(float scale, float bias) {
     alpha_scale_ = scale;
     alpha_bias_ = bias;
-    opacity_bias_dirty_ = true;  // reuses the parse_ply re-dispatch path
+    inflate_dirty_ = true;  // reuses the parse_ply re-dispatch path
   }
 
   // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
@@ -1106,14 +1102,14 @@ class Engine::Impl {
           camera_.Translate(0.f, speed * dt);
         }
 
-        // Hyperscape compatibility: PageUp/PageDown adjust opacity bias by ±0.5.
+        // Hole-filling: PageUp/PageDown adjust inflate by ±0.05.
         if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
-          SetOpacityBias(opacity_bias_ + 0.5f);
-          std::cout << "opacity bias: " << opacity_bias_ << std::endl;
+          SetInflate(inflate_ + 0.05f);
+          std::cout << "inflate: " << inflate_ << std::endl;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
-          SetOpacityBias(opacity_bias_ - 0.5f);
-          std::cout << "opacity bias: " << opacity_bias_ << std::endl;
+          SetInflate(inflate_ - 0.05f);
+          std::cout << "inflate: " << inflate_ << std::endl;
         }
 
         if (ImGui::IsKeyDown(ImGuiKey::ImGuiMod_Alt) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
@@ -1297,10 +1293,10 @@ class Engine::Impl {
         // rendering (green streaks) until the camera moves forces a rebuild.
         if (new_model_type != model_type_) {
           model_type_ = new_model_type;
-          // Mark opacity bias dirty to force parse_ply re-dispatch, which
+          // Mark inflate dirty to force parse_ply re-dispatch, which
           // rebuilds the gaussian buffers from the persistent PLY source.
           // This ensures the projection input is in the correct format.
-          opacity_bias_dirty_ = true;
+          inflate_dirty_ = true;
         }
 
         ImGui::SliderFloat("MIP bias", &splat_push_constants_.mip_bias, 0.0f, 1.0f);
@@ -1524,7 +1520,7 @@ class Engine::Impl {
         // Push opacity bias + alpha correction (Hyperscape compatibility).
         // Layout must match ParsePushConstants in parse_ply.comp.
         {
-          float push[3] = {opacity_bias_, alpha_scale_, alpha_bias_};
+          float push[3] = {inflate_, alpha_scale_, alpha_bias_};
           vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                              0, sizeof(push), push);
         }
@@ -1540,15 +1536,15 @@ class Engine::Impl {
 
         // hold buffer until the end of frame
         frame_info.ply_buffer = progress.ply_buffer;
-        // Also keep a persistent copy for opacity-bias re-dispatch (PageUp/PageDown).
+        // Also keep a persistent copy for inflate re-dispatch (PageUp/PageDown).
         // The FrameInfo buffer is freed after the load frame; we need the source
         // data alive for the lifetime of the scene.
         persistent_ply_buffer_ = progress.ply_buffer;
       }
 
-      // Re-run parse_ply if opacity bias changed via PageUp/PageDown.
+      // Re-run parse_ply if inflate changed via PageUp/PageDown.
       // Re-bind the persistent PLY buffer (the per-frame descriptor may be stale).
-      if (opacity_bias_dirty_ && loaded_point_count_ > 0) {
+      if (inflate_dirty_ && loaded_point_count_ > 0) {
         // Refresh the PLY descriptor with the persistent buffer. The descriptor
         // was last updated during the load frame; the buffer it pointed to has
         // since been freed. Using the stale descriptor reads garbage.
@@ -1565,7 +1561,7 @@ class Engine::Impl {
                                 NULL);
 
         {
-          float push[3] = {opacity_bias_, alpha_scale_, alpha_bias_};
+          float push[3] = {inflate_, alpha_scale_, alpha_bias_};
           vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                              0, sizeof(push), push);
         }
@@ -1579,7 +1575,7 @@ class Engine::Impl {
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &bias_barrier, 0, NULL, 0, NULL);
 
-        opacity_bias_dirty_ = false;
+        inflate_dirty_ = false;
       }
 
       if (loaded_point_count_ != 0) {
@@ -2224,9 +2220,9 @@ class Engine::Impl {
   bool batch_mode_ = false;
   bool batch_raygs_ = true;
 
-  // Hyperscape compatibility: GPU-side logit opacity bias (PageUp/PageDown adjustable).
-  float opacity_bias_ = 0.0f;
-  bool opacity_bias_dirty_ = false;
+  // Hole-filling: GPU-side 3D sigma multiplier (PageUp/PageDown adjustable).
+  float inflate_ = 1.3f;
+  bool inflate_dirty_ = false;
   // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
   // Applied as: alpha_out = clamp(alpha * scale + bias, 0, 1).
   float alpha_scale_ = 1.0f;
@@ -2282,16 +2278,12 @@ void Engine::SetDcOnly(bool dc_only) {
   impl_->SetDcOnly(dc_only);
 }
 
-void Engine::SetOpacityBias(float bias) {
-  impl_->SetOpacityBias(bias);
+void Engine::SetInflate(float factor) {
+  impl_->SetInflate(factor);
 }
 
 void Engine::SetAlphaCorrection(float scale, float bias) {
   impl_->SetAlphaCorrection(scale, bias);
-}
-
-void Engine::SetHoleFill(const HoleFillParams& params) {
-  impl_->SetHoleFill(params);
 }
 
 void Engine::Run() { impl_->Run(); }
