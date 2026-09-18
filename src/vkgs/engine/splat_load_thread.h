@@ -9,7 +9,6 @@
 
 #include "vkgs/vulkan/context.h"
 #include "vkgs/vulkan/buffer.h"
-#include "vkgs/engine/hole_fill_params.h"
 
 namespace vkgs {
 

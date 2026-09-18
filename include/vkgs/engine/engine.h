@@ -6,8 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "vkgs/engine/hole_fill_params.h"
-
 namespace vkgs {
 
 class Splats;
