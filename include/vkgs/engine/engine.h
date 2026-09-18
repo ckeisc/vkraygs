@@ -42,9 +42,9 @@ class Engine {
   // Debug: ignore SH view-dependent terms, use DC only.
   void SetDcOnly(bool dc_only);
 
-  // Hyperscape compatibility: logit-space opacity bias applied GPU-side in parse_ply.
-  // Real-time adjustable via PageUp/PageDown. Initial value from --opacity-bias flag.
-  void SetOpacityBias(float bias);
+  // Hole-filling: GPU-side 3D sigma multiplier applied in parse_ply.
+  // Real-time adjustable via PageUp/PageDown. Initial value from --inflate flag.
+  void SetInflate(float factor);
 
   // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
   // Applies alpha_out = clamp(alpha * scale + bias, 0, 1) GPU-side.

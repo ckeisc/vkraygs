@@ -37,11 +37,13 @@ float sigmoid(float x) { return 1.f / (1.f + exp(-x)); }
 
 // Hyperscape compatibility: logit-space opacity bias for real-time tuning,
 // plus experimental alpha correction (scale/bias on the 0-1 alpha) modeled
-// on the native renderer's alphaCorrectionParams uniform block.
+// Hole-filling: inflate each Gaussian's 3D volume at parse time.
+// Tunable alpha correction, modeled on the native renderer's
+// alphaCorrectionParams uniform block.
 // See docs/hyperscape-opacity-trace.md — the exact native formula is unknown;
 // this is a tunable approximation, not a reverse-engineered match.
 layout(push_constant, std430) uniform ParsePushConstants {
-  float opacity_bias;
+  float inflate;      // default 1.3: multiplies 3D sigma; 1.0 = off
   float alpha_scale;  // default 1.0: alpha_out = clamp(alpha * scale + bias, 0, 1)
   float alpha_bias;   // default 0.0
 };
@@ -62,7 +64,7 @@ void main() {
     uint base = local_offsets[59];
     vec3 s =
         vec3(ply[base * id + local_offsets[3]], ply[base * id + local_offsets[4]], ply[base * id + local_offsets[5]]);
-    s = exp(s);  // activation
+    s = exp(s) * inflate;  // activation + hole-filling volume inflation
 
     vec4 q = vec4(ply[base * id + local_offsets[6]], ply[base * id + local_offsets[7]],
                   ply[base * id + local_offsets[8]], ply[base * id + local_offsets[9]]);
@@ -86,6 +88,6 @@ void main() {
     }
 
     gaussian_opacity[id] =
-        clamp(sigmoid(ply[base * id + local_offsets[58]] + opacity_bias) * alpha_scale + alpha_bias, 0.0, 1.0);
+        clamp(sigmoid(ply[base * id + local_offsets[58]]) * alpha_scale + alpha_bias, 0.0, 1.0);
   }
 }
