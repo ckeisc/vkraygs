@@ -35,6 +35,17 @@ layout(std430, set = 3, binding = 0) readonly buffer GaussianPly {
 
 float sigmoid(float x) { return 1.f / (1.f + exp(-x)); }
 
+// Hyperscape compatibility: logit-space opacity bias for real-time tuning,
+// plus experimental alpha correction (scale/bias on the 0-1 alpha) modeled
+// on the native renderer's alphaCorrectionParams uniform block.
+// See docs/hyperscape-opacity-trace.md — the exact native formula is unknown;
+// this is a tunable approximation, not a reverse-engineered match.
+layout(push_constant, std430) uniform ParsePushConstants {
+  float opacity_bias;
+  float alpha_scale;  // default 1.0: alpha_out = clamp(alpha * scale + bias, 0, 1)
+  float alpha_bias;   // default 0.0
+};
+
 shared uint local_offsets[60];
 
 void main() {
@@ -74,6 +85,7 @@ void main() {
       gaussian_sh[48 * id + i] = float16_t(ply[base * id + local_offsets[10 + i]]);
     }
 
-    gaussian_opacity[id] = sigmoid(ply[base * id + local_offsets[58]]);
+    gaussian_opacity[id] =
+        clamp(sigmoid(ply[base * id + local_offsets[58]] + opacity_bias) * alpha_scale + alpha_bias, 0.0, 1.0);
   }
 }

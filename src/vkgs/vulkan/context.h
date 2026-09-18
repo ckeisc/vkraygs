@@ -2,6 +2,7 @@
 #define VKGS_VULKAN_CONTEXT_H
 
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string>
 
@@ -36,6 +37,10 @@ class Context {
   uint32_t transfer_queue_family_index() const;
   VkQueue graphics_queue() const;
   VkQueue transfer_queue() const;
+  // Mutex serializing vkQueueSubmit: graphics and transfer may be the same
+  // physical queue (e.g. single-queue software drivers), and concurrent
+  // submits from the load thread and the render thread are not allowed.
+  std::mutex& queue_mutex() const;
   VmaAllocator allocator() const;
   VkCommandPool command_pool() const;
   VkDescriptorPool descriptor_pool() const;

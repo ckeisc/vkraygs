@@ -3,8 +3,8 @@
 layout(points) in;
 layout(triangle_strip, max_vertices = 4) out;
 
-layout(location = 0) in vec3 in_scale_rot[];
-layout(location = 1) in vec4 in_color[];
+layout(location = 0) in vec4 in_scale_rot[];
+layout(location = 1) in vec4 in_color_opacity[];
 
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec2 out_position;
@@ -23,7 +23,7 @@ void main() {
 
   for (int i = 0; i < 4; ++i) {
     gl_Position = gl_in[0].gl_Position + vec4(screen_positions[i], 0.f, 0.f);
-    out_color = in_color[0];
+    out_color = in_color_opacity[0];
     out_position = confidence_radius * positions[i];
     EmitVertex();
   }

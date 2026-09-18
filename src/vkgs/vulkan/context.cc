@@ -3,6 +3,9 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -62,7 +65,26 @@ class Context::Impl {
         VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
     messenger_info.pfnUserCallback = DebugCallback;
 
-    std::vector<const char*> layers = {"VK_LAYER_KHRONOS_validation"};
+    // Enable the validation layer only if it is actually installed.
+    // Minimal/portable SDK setups (headers + loader only) do not ship it,
+    // and requesting a missing layer makes vkCreateInstance fail.
+    std::vector<const char*> layers;
+    {
+      uint32_t layer_count = 0;
+      vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+      std::vector<VkLayerProperties> available(layer_count);
+      vkEnumerateInstanceLayerProperties(&layer_count, available.data());
+      for (const auto& props : available) {
+        if (std::strcmp(props.layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+          layers.push_back("VK_LAYER_KHRONOS_validation");
+          break;
+        }
+      }
+      if (layers.empty()) {
+        std::cerr << "[vkgs] VK_LAYER_KHRONOS_validation not found, running without validation"
+                  << std::endl;
+      }
+    }
 
     uint32_t count;
     const char** glfw_extensions = glfwGetRequiredInstanceExtensions(&count);
@@ -75,11 +97,13 @@ class Context::Impl {
     instance_info.pNext = &messenger_info;
     instance_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     instance_info.pApplicationInfo = &application_info;
-    instance_info.enabledLayerCount = layers.size();
+    instance_info.enabledLayerCount = static_cast<uint32_t>(layers.size());
     instance_info.ppEnabledLayerNames = layers.data();
-    instance_info.enabledExtensionCount = instance_extensions.size();
+    instance_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
     instance_info.ppEnabledExtensionNames = instance_extensions.data();
-    vkCreateInstance(&instance_info, NULL, &instance_);
+    if (vkCreateInstance(&instance_info, NULL, &instance_) != VK_SUCCESS) {
+      throw std::runtime_error("vkCreateInstance failed");
+    }
 
     CreateDebugUtilsMessengerEXT(instance_, &messenger_info, NULL, &messenger_);
 
@@ -201,9 +225,24 @@ class Context::Impl {
       queue_infos.resize(1);
       queue_infos[0] = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
       queue_infos[0].queueFamilyIndex = graphics_queue_family_index_;
-      queue_infos[0].queueCount = 2;
+      // clamp to the family's actual queue count (e.g. Lavapipe exposes 1)
+      queue_infos[0].queueCount =
+          std::min(2u, queue_families[graphics_queue_family_index_].queueCount);
       queue_infos[0].pQueuePriorities = &queue_priorities[0];
     }
+
+    // query supported device extensions first: the external memory/semaphore
+    // fd extensions are optional (e.g. absent on software drivers like Lavapipe)
+    uint32_t device_ext_count = 0;
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &device_ext_count, nullptr);
+    std::vector<VkExtensionProperties> device_ext_props(device_ext_count);
+    vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &device_ext_count, device_ext_props.data());
+    auto device_has_extension = [&](const char* name) {
+      for (const auto& prop : device_ext_props) {
+        if (strcmp(prop.extensionName, name) == 0) return true;
+      }
+      return false;
+    };
 
     std::vector<const char*> device_extensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -212,11 +251,17 @@ class Context::Impl {
         "VK_KHR_external_semaphore_win32",
 #elif __APPLE__
         "VK_KHR_portability_subset",
-#else
-        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 #endif
     };
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // optional: only used for external sharing (e.g. CUDA interop)
+    if (device_has_extension(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+      device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+    }
+    if (device_has_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+      device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    }
+#endif
 
     VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_info.pNext = &features;
@@ -319,6 +364,7 @@ class Context::Impl {
   uint32_t transfer_queue_family_index() const noexcept { return transfer_queue_family_index_; }
   VkQueue graphics_queue() const noexcept { return graphics_queue_; }
   VkQueue transfer_queue() const noexcept { return transfer_queue_; }
+  std::mutex& queue_mutex() const noexcept { return queue_mutex_; }
   VmaAllocator allocator() const noexcept { return allocator_; }
   VkCommandPool command_pool() const noexcept { return command_pool_; }
   VkDescriptorPool descriptor_pool() const noexcept { return descriptor_pool_; }
@@ -357,6 +403,7 @@ class Context::Impl {
   uint32_t transfer_queue_family_index_ = 0;
   VkQueue graphics_queue_ = VK_NULL_HANDLE;
   VkQueue transfer_queue_ = VK_NULL_HANDLE;
+  mutable std::mutex queue_mutex_;
   VmaAllocator allocator_ = VK_NULL_HANDLE;
   VkCommandPool command_pool_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
@@ -395,6 +442,8 @@ uint32_t Context::transfer_queue_family_index() const { return impl_->transfer_q
 VkQueue Context::graphics_queue() const { return impl_->graphics_queue(); }
 
 VkQueue Context::transfer_queue() const { return impl_->transfer_queue(); }
+
+std::mutex& Context::queue_mutex() const { return impl_->queue_mutex(); }
 
 VmaAllocator Context::allocator() const { return impl_->allocator(); }
 

@@ -23,6 +23,11 @@ layout(push_constant, std430) uniform PushConstants {
   float mip_bias;
   float log_p_min;
   bool mip_modulation;
+  int cull_view0;
+  int cull_view1;
+  int cull_view2;
+  int cull_mode;  // 0 = off, 1 = dynamic GPU visibility culling
+  uint cull_words_per_mask;
 };
 
 layout(set = 1, binding = 0) uniform Info { uint point_count; };
@@ -41,6 +46,10 @@ layout(std430, set = 1, binding = 3) readonly buffer GaussianOpacity {
 
 layout(std430, set = 1, binding = 4) readonly buffer GaussianSh {
   f16vec4 gaussian_sh[];  // (N, 3, 4, 4), 16 values packed with 4 vec4.
+};
+
+layout(std430, set = 1, binding = 5) readonly buffer VisibilityMasks {
+  uint visibility_masks[];  // (num_views, cull_words_per_mask), transposed from per-splat uint64
 };
 
 layout(std430, set = 2, binding = 0) writeonly buffer DrawIndirect {
@@ -131,6 +140,19 @@ void main() {
   uint id = gl_GlobalInvocationID.x;
   if (id >= point_count) return;
 
+  // Dynamic visibility-cluster culling: keep the splat if it is visible from
+  // ANY of the 3 nearest precomputed viewpoints (union = conservative, avoids popping).
+  if (cull_mode == 1) {
+    uint word_idx = id / 32u;
+    if (word_idx < cull_words_per_mask) {
+      uint bit = 1u << (id % 32u);
+      uint w0 = visibility_masks[uint(cull_view0) * cull_words_per_mask + word_idx];
+      uint w1 = visibility_masks[uint(cull_view1) * cull_words_per_mask + word_idx];
+      uint w2 = visibility_masks[uint(cull_view2) * cull_words_per_mask + word_idx];
+      if (((w0 | w1 | w2) & bit) == 0u) return;
+    }
+  }
+
   if (id == 0) {
     indexCount = 6 * visible_point_count;
     instanceCount = 1;
@@ -169,7 +191,7 @@ void main() {
   // direction in model space for SH calculation
   vec4 camera_podel_position = inverse(model) * vec4(camera_position, 1.f);
   camera_podel_position = camera_podel_position / camera_podel_position.w;
-  vec3 dir = normalize(pos.xyz - camera_podel_position.xyz);
+  vec3 dir = normalize(camera_podel_position.xyz - pos.xyz);
 
   // model matrix
   mat3 model3d = mat3(model);

@@ -37,8 +37,16 @@ class Camera {
   void Translate(float x, float y, float z = 0.f);
   void Zoom(float x);
   void DollyZoom(float scroll);
+  // Move through space along the view direction (not scaled by orbit radius).
+  // Positive amount moves forward (into the scene).
+  void Dolly(float amount);
+
+  // World up-axis convention for the orbit camera. Default is Y-up;
+  // set to true for Z-up data (e.g. Hyperscape SPZ captures).
+  void SetZUp(bool z_up) { z_up_ = z_up; }
 
  private:
+  bool z_up_ = false;
   uint32_t width_ = 256;
   uint32_t height_ = 256;
   float fovy_ = glm::radians(60.f);
@@ -55,6 +63,7 @@ class Camera {
   float translation_sensitivity_ = 0.002f;
   float zoom_sensitivity_ = 0.01f;
   float dolly_zoom_sensitivity_ = glm::radians(1.f);
+  float dolly_sensitivity_ = 0.1f;
 };
 
 }  // namespace vkgs

@@ -34,13 +34,20 @@ glm::mat4 Camera::ProjectionMatrix() const {
   return conversion * projection;
 }
 
-glm::mat4 Camera::ViewMatrix() const { return glm::lookAt(Eye(), center_, glm::vec3(0.f, 1.f, 0.f)); }
+glm::mat4 Camera::ViewMatrix() const {
+  const glm::vec3 up = z_up_ ? glm::vec3(0.f, 0.f, 1.f) : glm::vec3(0.f, 1.f, 0.f);
+  return glm::lookAt(Eye(), center_, up);
+}
 
 glm::vec3 Camera::Eye() const {
   const auto sin_phi = std::sin(phi_);
   const auto cos_phi = std::cos(phi_);
   const auto sin_theta = std::sin(theta_);
   const auto cos_theta = std::cos(theta_);
+  if (z_up_) {
+    // camera = center + r (sin phi sin theta, sin phi cos theta, cos phi)
+    return center_ + r_ * glm::vec3(sin_phi * sin_theta, sin_phi * cos_theta, cos_phi);
+  }
   return center_ + r_ * glm::vec3(sin_phi * sin_theta, cos_phi, sin_phi * cos_theta);
 }
 
@@ -51,18 +58,42 @@ void Camera::Rotate(float x, float y) {
 }
 
 void Camera::Translate(float x, float y, float z) {
-  // camera = center + r (sin phi sin theta, cos phi, sin phi cos theta)
   const auto sin_phi = std::sin(phi_);
   const auto cos_phi = std::cos(phi_);
   const auto sin_theta = std::sin(theta_);
   const auto cos_theta = std::cos(theta_);
-  center_ +=
-      translation_sensitivity_ * r_ *
-      (-x * glm::vec3(cos_theta, 0.f, -sin_theta) + y * glm::vec3(-cos_phi * sin_theta, sin_phi, -cos_phi * cos_theta) +
-       -z * glm::vec3(sin_phi * sin_theta, cos_phi, sin_phi * cos_theta));
+  glm::vec3 right, screen_up, forward;
+  if (z_up_) {
+    // camera = center + r (sin phi sin theta, sin phi cos theta, cos phi)
+    right = glm::vec3(cos_theta, -sin_theta, 0.f);
+    screen_up = glm::vec3(-cos_phi * sin_theta, -cos_phi * cos_theta, sin_phi);
+    forward = glm::vec3(sin_phi * sin_theta, sin_phi * cos_theta, cos_phi);
+  } else {
+    // camera = center + r (sin phi sin theta, cos phi, sin phi cos theta)
+    right = glm::vec3(cos_theta, 0.f, -sin_theta);
+    screen_up = glm::vec3(-cos_phi * sin_theta, sin_phi, -cos_phi * cos_theta);
+    forward = glm::vec3(sin_phi * sin_theta, cos_phi, sin_phi * cos_theta);
+  }
+  center_ += translation_sensitivity_ * r_ * (-x * right + y * screen_up + -z * forward);
 }
 
 void Camera::Zoom(float x) { r_ /= std::exp(zoom_sensitivity_ * x); }
+
+void Camera::Dolly(float amount) {
+  const auto sin_phi = std::sin(phi_);
+  const auto cos_phi = std::cos(phi_);
+  const auto sin_theta = std::sin(theta_);
+  const auto cos_theta = std::cos(theta_);
+  glm::vec3 forward;
+  if (z_up_) {
+    forward = glm::vec3(sin_phi * sin_theta, sin_phi * cos_theta, cos_phi);
+  } else {
+    forward = glm::vec3(sin_phi * sin_theta, cos_phi, sin_phi * cos_theta);
+  }
+  // forward points from center to camera; view direction is -forward.
+  // Move center along -forward to fly into the scene (fixed speed, not scaled by r_).
+  center_ += -amount * dolly_sensitivity_ * forward;
+}
 
 void Camera::DollyZoom(float scroll) {
   float new_fov = std::clamp(fovy_ - scroll * dolly_zoom_sensitivity_, min_fov(), max_fov());

@@ -12,6 +12,17 @@
 #include <algorithm>
 #include <mutex>
 #include <map>
+#include <array>
+#include <cstdio>
+#include <vector>
+#include <cstdint>
+#include <fstream>
+#include <limits>
+
+#include <vulkan/vulkan.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 #include <vulkan/vulkan.h>
 
@@ -95,11 +106,18 @@ struct Resolution {
 };
 
 struct SplatPushConstants {
-  SplatPushConstants():mip_bias(0.1f), log_p_min(-4.0f), mip_modulation(true) {}
+  SplatPushConstants():mip_bias(0.1f), log_p_min(-4.0f), mip_modulation(true),
+    cull_view0(0), cull_view1(0), cull_view2(0), cull_mode(0), cull_words_per_mask(0) {}
   glm::mat4 model;
   float mip_bias;
   float log_p_min;
   bool mip_modulation;
+  // Dynamic GPU visibility culling: 3 nearest viewpoint indices (union).
+  int cull_view0;
+  int cull_view1;
+  int cull_view2;
+  int cull_mode;  // 0 = off, 1 = dynamic
+  uint32_t cull_words_per_mask;
 };
 
 std::vector<Resolution> preset_resolutions = {
@@ -159,7 +177,7 @@ class Engine::Impl {
 
     {
       vk::DescriptorLayoutCreateInfo descriptor_layout_info = {};
-      descriptor_layout_info.bindings.resize(5);
+      descriptor_layout_info.bindings.resize(6);
       descriptor_layout_info.bindings[0] = {};
       descriptor_layout_info.bindings[0].binding = 0;
       descriptor_layout_info.bindings[0].descriptor_type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -184,6 +202,11 @@ class Engine::Impl {
       descriptor_layout_info.bindings[4].binding = 4;
       descriptor_layout_info.bindings[4].descriptor_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       descriptor_layout_info.bindings[4].stage_flags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+      descriptor_layout_info.bindings[5] = {};
+      descriptor_layout_info.bindings[5].binding = 5;
+      descriptor_layout_info.bindings[5].descriptor_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      descriptor_layout_info.bindings[5].stage_flags = VK_SHADER_STAGE_COMPUTE_BIT;
 
       gaussian_descriptor_layout_ = vk::DescriptorLayout(context_, descriptor_layout_info);
     }
@@ -383,23 +406,27 @@ class Engine::Impl {
       std::vector<VkVertexInputBindingDescription> input_bindings(1);
       input_bindings[0].binding = 0;
       input_bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-      input_bindings[0].stride = sizeof(float) * 10;
+      input_bindings[0].stride = sizeof(float) * 12;  // 3x vec4 per instance (48 bytes)
 
       std::vector<VkVertexInputAttributeDescription> input_attributes(3);
+      // Buffer layout from projection.comp: 3x vec4 per instance (48-byte stride)
+      //   offset 0:  vec4(ndc_position.xyz, padding)
+      //   offset 16: vec4(rot_scale)
+      //   offset 32: vec4(color.rgb, opacity)
       input_attributes[0].location = 0;
       input_attributes[0].binding = 0;
-      input_attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+      input_attributes[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
       input_attributes[0].offset = 0;
 
       input_attributes[1].location = 1;
       input_attributes[1].binding = 0;
-      input_attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-      input_attributes[1].offset = sizeof(float) * 3;
+      input_attributes[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+      input_attributes[1].offset = sizeof(float) * 4;
 
       input_attributes[2].location = 2;
       input_attributes[2].binding = 0;
       input_attributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-      input_attributes[2].offset = sizeof(float) * 6;
+      input_attributes[2].offset = sizeof(float) * 8;
 
       vk::GraphicsPipelineCreateInfo pipeline_info = {};
       pipeline_info.layout = graphics_pipeline_layout_;
@@ -558,8 +585,12 @@ class Engine::Impl {
       splat_storage_.inverse_index = vk::Buffer(context_, MAX_SPLAT_COUNT * sizeof(uint32_t),
                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
-      splat_storage_.instance = vk::Buffer(context_, MAX_SPLAT_COUNT * 14 * sizeof(float),
+      // GS: 12 floats (3x vec4) per instance. RayGS: 14 floats per instance.
+      // Separate buffers to avoid layout/stride confusion when switching kernels.
+      splat_storage_.instance = vk::Buffer(context_, MAX_SPLAT_COUNT * 12 * sizeof(float),
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+      splat_storage_.instance_raygs = vk::Buffer(context_, MAX_SPLAT_COUNT * 14 * sizeof(float),
+                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     }
 
     {
@@ -604,12 +635,199 @@ class Engine::Impl {
     splat_load_thread_.Start(ply_filepath);
   }
 
+  void SetKernelRayGS(bool raygs) { batch_raygs_ = raygs; }
+
+  void SetZUp(bool z_up) { camera_.SetZUp(z_up); }
+
+  void SetBatchViews(const std::vector<std::array<float, 16>>& views,
+                     const std::vector<std::array<float, 3>>& eyes) {
+    batch_views_ = views;
+    batch_eyes_ = eyes;
+    batch_mode_ = !views.empty() && views.size() == eyes.size();
+  }
+
+  void SetBatchOutput(const std::string& dir, const std::string& prefix) {
+    batch_out_dir_ = dir;
+    batch_prefix_ = prefix;
+  }
+
+  void SetCullMasks(const std::string& masks_path, int view_index) {
+    cull_masks_path_ = masks_path;  // kept for dynamic GPU culling (even if view_index < 0)
+    splat_load_thread_.SetCullMasks(masks_path, view_index);
+  }
+
+  void SetCullCentroids(const std::string& centroids_path) {
+    cull_centroids_path_ = centroids_path;
+  }
+
+  void SetDcOnly(bool dc_only) {
+    splat_load_thread_.SetDcOnly(dc_only);
+  }
+
+  void SetOpacityBias(float bias) {
+    opacity_bias_ = bias;
+    opacity_bias_dirty_ = true;
+  }
+
+  // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
+  void SetAlphaCorrection(float scale, float bias) {
+    alpha_scale_ = scale;
+    alpha_bias_ = bias;
+    opacity_bias_dirty_ = true;  // reuses the parse_ply re-dispatch path
+  }
+
+  // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
+  static bool LoadCullCentroids(const std::string& path, std::vector<glm::vec3>* out) {
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    const size_t views_key = content.find("\"views\"");
+    if (views_key == std::string::npos) return false;
+    const size_t arr_begin = content.find('[', views_key);
+    if (arr_begin == std::string::npos) return false;
+
+    // Find matching closing bracket for the views array.
+    int depth = 0;
+    size_t arr_end = std::string::npos;
+    for (size_t i = arr_begin; i < content.size(); ++i) {
+      if (content[i] == '[') ++depth;
+      else if (content[i] == ']') {
+        if (--depth == 0) { arr_end = i; break; }
+      }
+    }
+    if (arr_end == std::string::npos) return false;
+
+    // Within the views array, each [x,y,z] is a centroid.
+    std::vector<glm::vec3> centroids;
+    size_t pos = arr_begin + 1;
+    while (pos < arr_end && centroids.size() < 64) {
+      const size_t vb = content.find('[', pos);
+      if (vb == std::string::npos || vb >= arr_end) break;
+      const size_t ve = content.find(']', vb);
+      if (ve == std::string::npos || ve > arr_end) break;
+      std::string nums = content.substr(vb + 1, ve - vb - 1);
+      for (char& c : nums) if (c == ',') c = ' ';
+      float x, y, z;
+      if (std::sscanf(nums.c_str(), "%f %f %f", &x, &y, &z) == 3) {
+        centroids.emplace_back(x, y, z);
+      }
+      pos = ve + 1;
+    }
+
+    *out = std::move(centroids);
+    return !out->empty();
+  }
+
+  // One-time setup for dynamic GPU visibility culling: load per-splat uint64
+  // masks, transpose to (num_views, words_per_mask) uint32 for the shader,
+  // parse centroid positions, upload to a GPU storage buffer.
+  void InitDynamicCulling() {
+    if (cull_masks_path_.empty() || cull_centroids_path_.empty()) return;
+
+    if (!LoadCullCentroids(cull_centroids_path_, &cull_centroids_)) {
+      fprintf(stderr, "[cull] warning: could not parse centroids %s\n", cull_centroids_path_.c_str());
+      return;
+    }
+    size_t num_views = cull_centroids_.size();
+    if (num_views > 64) {
+      fprintf(stderr, "[cull] warning: %zu views > 64, truncating\n", num_views);
+      cull_centroids_.resize(64);
+      num_views = 64;
+    }
+    fprintf(stderr, "[cull] loaded %zu viewpoints from %s\n", num_views, cull_centroids_path_.c_str());
+
+    std::ifstream mf(cull_masks_path_, std::ios::binary | std::ios::ate);
+    if (!mf) {
+      fprintf(stderr, "[cull] warning: could not open masks %s\n", cull_masks_path_.c_str());
+      return;
+    }
+    const size_t file_size = static_cast<size_t>(mf.tellg());
+    mf.seekg(0);
+    const size_t num_splats = file_size / sizeof(uint64_t);
+    std::vector<uint64_t> masks(num_splats);
+    mf.read(reinterpret_cast<char*>(masks.data()), num_splats * sizeof(uint64_t));
+    if (!mf) {
+      fprintf(stderr, "[cull] warning: could not read masks %s\n", cull_masks_path_.c_str());
+      return;
+    }
+
+    cull_words_per_mask_ = static_cast<uint32_t>((num_splats + 31) / 32);
+    std::vector<uint32_t> transposed(num_views * cull_words_per_mask_, 0);
+    for (size_t i = 0; i < num_splats; ++i) {
+      const uint64_t m = masks[i];
+      if (!m) continue;
+      const uint32_t word = static_cast<uint32_t>(i / 32);
+      const uint32_t bit = 1u << (i % 32);
+      for (size_t v = 0; v < num_views; ++v) {
+        if (m & (1ULL << v)) transposed[v * cull_words_per_mask_ + word] |= bit;
+      }
+    }
+    fprintf(stderr, "[cull] transposed %zu splats x %zu views -> %u words/view (%zu bytes)\n",
+            num_splats, num_views, cull_words_per_mask_, transposed.size() * sizeof(uint32_t));
+
+    cull_masks_buffer_ = vk::Buffer(context_, transposed.size() * sizeof(uint32_t),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+    VkCommandBufferAllocateInfo cb_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cb_info.commandPool = context_.command_pool();
+    cb_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cb_info.commandBufferCount = 1;
+    VkCommandBuffer cb;
+    vkAllocateCommandBuffers(context_.device(), &cb_info, &cb);
+    VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &begin_info);
+    cull_masks_buffer_.FromCpu(cb, transposed);
+    vkEndCommandBuffer(cb);
+    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cb;
+    {
+      std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+      vkQueueSubmit(context_.graphics_queue(), 1, &submit, VK_NULL_HANDLE);
+      vkQueueWaitIdle(context_.graphics_queue());
+    }
+    vkFreeCommandBuffers(context_.device(), context_.command_pool(), 1, &cb);
+
+    splat_push_constants_.cull_words_per_mask = cull_words_per_mask_;
+    splat_push_constants_.cull_mode = 1;
+    cull_dynamic_ready_ = true;
+    fprintf(stderr, "[cull] dynamic GPU culling ready\n");
+  }
+
+  // Find the 3 nearest centroid indices to the given eye position.
+  void FindNearestCullViews(const glm::vec3& eye, int* v0, int* v1, int* v2) const {
+    int best0 = 0, best1 = 0, best2 = 0;
+    float d0 = std::numeric_limits<float>::max();
+    float d1 = std::numeric_limits<float>::max();
+    float d2 = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < cull_centroids_.size(); ++i) {
+      const glm::vec3 d = cull_centroids_[i] - eye;
+      const float dist2 = glm::dot(d, d);
+      if (dist2 < d0) {
+        d2 = d1; best2 = best1;
+        d1 = d0; best1 = best0;
+        d0 = dist2; best0 = static_cast<int>(i);
+      } else if (dist2 < d1) {
+        d2 = d1; best2 = best1;
+        d1 = dist2; best1 = static_cast<int>(i);
+      } else if (dist2 < d2) {
+        d2 = dist2; best2 = static_cast<int>(i);
+      }
+    }
+    *v0 = best0; *v1 = best1; *v2 = best2;
+  }
+
   void LoadSplatsAsync(const std::string& ply_filepath) {
     std::unique_lock<std::mutex> guard{mutex_};
     pending_ply_filepath_ = ply_filepath;
   }
 
   void Run() {
+    // Dynamic GPU visibility culling: upload transposed masks once before rendering.
+    InitDynamicCulling();
+
     viewer::WindowCreateInfo window_info = {};
     window_info.instance = context_.instance();
     window_info.physical_device = context_.physical_device();
@@ -628,13 +846,25 @@ class Engine::Impl {
     viewer_.Show();
     terminate_ = false;
 
+    if (batch_mode_) {
+      // clean renders: no axis/grid helpers, no ImGui overlay
+      show_axis_ = false;
+      show_grid_ = false;
+      model_type_ = batch_raygs_ ? ModelType::RayGS : ModelType::GS;
+      std::cout << "[batch] rendering " << batch_views_.size() << " poses ("
+                << (batch_raygs_ ? "raygs" : "gs") << ") -> " << batch_out_dir_ << "/" << batch_prefix_
+                << "_poseNNN.png" << std::endl;
+    }
+
     // main loop
     while (!viewer_.ShouldClose() && !terminate_) {
       viewer_.PollEvents();
 
       // handle dropped files
       for (const auto& filepath : viewer_.ConsumeDroppedFilepaths()) {
-        if (filepath.length() > 4 && filepath.substr(filepath.length() - 4) == ".ply") {
+        const bool is_ply = filepath.length() > 4 && filepath.substr(filepath.length() - 4) == ".ply";
+        const bool is_spz = filepath.length() > 4 && filepath.substr(filepath.length() - 4) == ".spz";
+        if (is_ply || is_spz) {
           LoadSplatsAsync(filepath);
           break;
         }
@@ -795,7 +1025,10 @@ class Engine::Impl {
     submit_info.pCommandBuffers = &cb;
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &transfer_semaphore_;
-    vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, NULL);
+    {
+      std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+      vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, NULL);
+    }
 
     transfer_timeline_++;
   }
@@ -842,8 +1075,10 @@ class Engine::Impl {
         if (io.MouseWheel != 0.f) {
           if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
             camera_.DollyZoom(io.MouseWheel);
-          } else {
+          } else if (ImGui::IsKeyDown(ImGuiKey_LeftShift)) {
             camera_.Zoom(io.MouseWheel * 10.f);
+          } else {
+            camera_.Dolly(io.MouseWheel);
           }
         }
       }
@@ -865,6 +1100,16 @@ class Engine::Impl {
         }
         if (ImGui::IsKeyDown(ImGuiKey_Space)) {
           camera_.Translate(0.f, speed * dt);
+        }
+
+        // Hyperscape compatibility: PageUp/PageDown adjust opacity bias by ±0.5.
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
+          SetOpacityBias(opacity_bias_ + 0.5f);
+          std::cout << "opacity bias: " << opacity_bias_ << std::endl;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
+          SetOpacityBias(opacity_bias_ - 0.5f);
+          std::cout << "opacity bias: " << opacity_bias_ << std::endl;
         }
 
         if (ImGui::IsKeyDown(ImGuiKey::ImGuiMod_Alt) && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
@@ -1030,17 +1275,28 @@ class Engine::Impl {
           ImGui::RadioButton("RayGS", &model_type, 1);
         }
 
+        ModelType new_model_type = model_type_;
         switch (model_type) {
           case 0:
-            model_type_ = ModelType::GS;
+            new_model_type = ModelType::GS;
             break;
 
           case 1:
-            model_type_ = ModelType::RayGS;
+            new_model_type = ModelType::RayGS;
             break;
 
           default:
             break;
+        }
+        // If kernel changed, force a full state reset. The projection output
+        // format differs between GS and RayGS; stale buffers cause corrupted
+        // rendering (green streaks) until the camera moves forces a rebuild.
+        if (new_model_type != model_type_) {
+          model_type_ = new_model_type;
+          // Mark opacity bias dirty to force parse_ply re-dispatch, which
+          // rebuilds the gaussian buffers from the persistent PLY source.
+          // This ensures the projection input is in the correct format.
+          opacity_bias_dirty_ = true;
         }
 
         ImGui::SliderFloat("MIP bias", &splat_push_constants_.mip_bias, 0.0f, 1.0f);
@@ -1128,9 +1384,36 @@ class Engine::Impl {
     }
 
     camera_buffer_[frame_index].projection = camera_.ProjectionMatrix();
-    camera_buffer_[frame_index].view = camera_.ViewMatrix();
-    camera_buffer_[frame_index].camera_position = camera_.Eye();
+    if (batch_mode_ && batch_index_ < batch_views_.size()) {
+      // batch pose: explicit view matrix + eye position
+      camera_buffer_[frame_index].view = glm::make_mat4(batch_views_[batch_index_].data());
+      const auto& e = batch_eyes_[batch_index_];
+      camera_buffer_[frame_index].camera_position = glm::vec3(e[0], e[1], e[2]);
+    } else {
+      camera_buffer_[frame_index].view = camera_.ViewMatrix();
+      camera_buffer_[frame_index].camera_position = camera_.Eye();
+    }
     camera_buffer_[frame_index].screen_size = {camera_.width(), camera_.height()};
+
+    // Dynamic GPU culling: 3 nearest viewpoints to the camera eye (union = conservative).
+    if (cull_dynamic_ready_) {
+      int v0, v1, v2;
+      FindNearestCullViews(camera_buffer_[frame_index].camera_position, &v0, &v1, &v2);
+      splat_push_constants_.cull_view0 = v0;
+      splat_push_constants_.cull_view1 = v1;
+      splat_push_constants_.cull_view2 = v2;
+    }
+
+    // batch capture state machine: arm once the loaded splat count is stable
+    batch_armed_ = false;
+    if (batch_mode_ && batch_index_ < batch_views_.size()) {
+      if (loaded_point_count_ > 0 && loaded_point_count_ == batch_last_loaded_) {
+        if (++batch_warmup_ >= 4) batch_armed_ = true;
+      } else {
+        batch_warmup_ = 0;
+      }
+      batch_last_loaded_ = loaded_point_count_;
+    }
 
     // recreate swapchain if need resize
     if (swapchain_.ShouldRecreate()) {
@@ -1182,6 +1465,9 @@ class Engine::Impl {
         descriptors_[frame_index].gaussian.Update(3, splat_storage_.opacity, 0,
                                                   loaded_point_count_ * 1 * sizeof(float));
         descriptors_[frame_index].gaussian.Update(4, splat_storage_.sh, 0, loaded_point_count_ * 48 * sizeof(uint16_t));
+        if (cull_dynamic_ready_) {
+          descriptors_[frame_index].gaussian.Update(5, cull_masks_buffer_, 0, cull_masks_buffer_.size());
+        }
 
         descriptors_[frame_index].splat_instance.Update(1, splat_storage_.instance, 0,
                                                         loaded_point_count_ * 14 * sizeof(float));
@@ -1231,6 +1517,14 @@ class Engine::Impl {
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 3, 1, &descriptor, 0,
                                 NULL);
 
+        // Push opacity bias + alpha correction (Hyperscape compatibility).
+        // Layout must match ParsePushConstants in parse_ply.comp.
+        {
+          float push[3] = {opacity_bias_, alpha_scale_, alpha_bias_};
+          vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                             0, sizeof(push), push);
+        }
+
         constexpr int local_size = 256;
         vkCmdDispatch(cb, (loaded_point_count_ + local_size - 1) / local_size, 1, 1);
 
@@ -1242,6 +1536,46 @@ class Engine::Impl {
 
         // hold buffer until the end of frame
         frame_info.ply_buffer = progress.ply_buffer;
+        // Also keep a persistent copy for opacity-bias re-dispatch (PageUp/PageDown).
+        // The FrameInfo buffer is freed after the load frame; we need the source
+        // data alive for the lifetime of the scene.
+        persistent_ply_buffer_ = progress.ply_buffer;
+      }
+
+      // Re-run parse_ply if opacity bias changed via PageUp/PageDown.
+      // Re-bind the persistent PLY buffer (the per-frame descriptor may be stale).
+      if (opacity_bias_dirty_ && loaded_point_count_ > 0) {
+        // Refresh the PLY descriptor with the persistent buffer. The descriptor
+        // was last updated during the load frame; the buffer it pointed to has
+        // since been freed. Using the stale descriptor reads garbage.
+        descriptors_[frame_index].ply.Update(0, persistent_ply_buffer_, 0);
+
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, parse_ply_pipeline_);
+
+        VkDescriptorSet descriptor = descriptors_[frame_index].gaussian;
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 1, 1, &descriptor, 0,
+                                NULL);
+
+        descriptor = descriptors_[frame_index].ply;
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 3, 1, &descriptor, 0,
+                                NULL);
+
+        {
+          float push[3] = {opacity_bias_, alpha_scale_, alpha_bias_};
+          vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                             0, sizeof(push), push);
+        }
+
+        constexpr int local_size = 256;
+        vkCmdDispatch(cb, (loaded_point_count_ + local_size - 1) / local_size, 1, 1);
+
+        VkMemoryBarrier bias_barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        bias_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        bias_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &bias_barrier, 0, NULL, 0, NULL);
+
+        opacity_bias_dirty_ = false;
       }
 
       if (loaded_point_count_ != 0) {
@@ -1295,7 +1629,9 @@ class Engine::Impl {
         }
 
         // radix sort
-        {
+        // Note: VKGS_SKIP_SORT=1 works around a crash in the third-party radix
+        // sort library on Mesa Lavapipe (software Vulkan). Not needed on real GPUs.
+        if (getenv("VKGS_SKIP_SORT") == nullptr) {
           vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, timestamp_query_pool, 3);
 
           vrdxCmdSortKeyValueIndirect(cb, sorter_, loaded_point_count_, splat_visible_point_count_, 0,
@@ -1345,6 +1681,28 @@ class Engine::Impl {
 
           vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, model_type_ == ModelType::GS?projection_pipeline_:raygs_projection_pipeline_);
 
+          // Bind the correct instance buffer for the active kernel. GS uses
+          // 12 floats/instance (3x vec4), RayGS uses 14 floats/instance.
+          // Separate buffers avoid stride/layout confusion when switching.
+          {
+            std::vector<VkDescriptorSet> proj_descriptors = {
+                descriptors_[frame_index].camera,
+                descriptors_[frame_index].gaussian,
+                descriptors_[frame_index].splat_instance,
+            };
+            // Update binding 1 to point to the kernel-specific instance buffer.
+            // Note: splat_instance descriptor was created with the shared buffer;
+            // we need to update it here for the active kernel.
+            vk::Buffer& instance_buf = (model_type_ == ModelType::GS)
+                ? splat_storage_.instance
+                : splat_storage_.instance_raygs;
+            size_t instance_floats = (model_type_ == ModelType::GS) ? 12 : 14;
+            descriptors_[frame_index].splat_instance.Update(
+                1, instance_buf, 0, loaded_point_count_ * instance_floats * sizeof(float));
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 0,
+                                    proj_descriptors.size(), proj_descriptors.data(), 0, nullptr);
+          }
+
           vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(splat_push_constants_), &splat_push_constants_);
 
           vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestamp_query_pool, 7);
@@ -1381,6 +1739,10 @@ class Engine::Impl {
       }
 
       vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, timestamp_query_pool, 11);
+
+      // batch screenshot: copy the presented swapchain image to a staging buffer
+      if (batch_armed_) RecordScreenshot(cb, image_index);
+
       vkEndCommandBuffer(cb);
 
       std::vector<VkSemaphore> wait_semaphores = {image_acquired_semaphore, transfer_semaphore_};
@@ -1404,7 +1766,10 @@ class Engine::Impl {
       submit_info.pCommandBuffers = &cb;
       submit_info.signalSemaphoreCount = 1;
       submit_info.pSignalSemaphores = &render_finished_semaphore;
-      vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, render_finished_fence);
+      {
+        std::unique_lock<std::mutex> guard{context_.queue_mutex()};
+        vkQueueSubmit(context_.graphics_queue(), 1, &submit_info, render_finished_fence);
+      }
 
       VkSwapchainKHR swapchain_handle = swapchain_;
       VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -1416,6 +1781,21 @@ class Engine::Impl {
       frame_info.present_timestamp = Clock::timestamp();
       vkQueuePresentKHR(context_.graphics_queue(), &present_info);
       frame_info.present_done_timestamp = Clock::timestamp();
+
+      if (batch_armed_) {
+        // the screenshot copy was recorded into this frame's command buffer;
+        // wait for it, write the PNG, then advance to the next pose
+        VkFence fence = render_finished_fences_[frame_index];
+        vkWaitForFences(context_.device(), 1, &fence, VK_TRUE, UINT64_MAX);
+        WriteScreenshotPng(batch_index_);
+        batch_armed_ = false;
+        batch_warmup_ = 0;
+        batch_last_loaded_ = 0;
+        if (++batch_index_ >= batch_views_.size()) {
+          std::cout << "[batch] done (" << batch_views_.size() << " poses)" << std::endl;
+          terminate_ = true;
+        }
+      }
 
       frame_counter_++;
     }
@@ -1457,6 +1837,60 @@ class Engine::Impl {
 
       RecreateFramebuffer();
     }
+  }
+
+  void RecordScreenshot(VkCommandBuffer cb, uint32_t image_index) {
+    const uint32_t w = swapchain_.width();
+    const uint32_t h = swapchain_.height();
+    const VkDeviceSize need = static_cast<VkDeviceSize>(w) * h * 4;
+    if (screenshot_size_ != need) {
+      screenshot_staging_ = vk::CpuBuffer(context_, need);
+      screenshot_size_ = need;
+    }
+
+    VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = swapchain_.image(image_index);
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region = {};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(cb, swapchain_.image(image_index), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           screenshot_staging_, 1, &region);
+
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = 0;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+  }
+
+  void WriteScreenshotPng(size_t pose_index) {
+    const uint32_t w = swapchain_.width();
+    const uint32_t h = swapchain_.height();
+    const uint8_t* src = static_cast<const uint8_t*>(screenshot_staging_.data());
+    std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+    // swapchain is B8G8R8A8_UNORM; stb_image_write expects RGBA
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+      rgba[4 * i + 0] = src[4 * i + 2];
+      rgba[4 * i + 1] = src[4 * i + 1];
+      rgba[4 * i + 2] = src[4 * i + 0];
+      rgba[4 * i + 3] = src[4 * i + 3];
+    }
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/%s_pose%03zu.png", batch_out_dir_.c_str(), batch_prefix_.c_str(),
+                  pose_index);
+    stbi_write_png(path, w, h, 4, rgba.data(), w * 4);
+    std::cout << "[batch] wrote " << path << std::endl;
   }
 
   void DrawNormalPass(VkCommandBuffer cb, uint32_t frame_index, uint32_t width, uint32_t height,
@@ -1578,8 +2012,8 @@ class Engine::Impl {
       }
     }
 
-    // draw ui
-    viewer_.DrawUi(cb);
+    // draw ui (skipped in batch mode for clean captures)
+    if (!batch_mode_) viewer_.DrawUi(cb);
 
     vkCmdEndRenderPass(cb);
   }
@@ -1649,7 +2083,19 @@ class Engine::Impl {
   VkFormat depth_format_ = VK_FORMAT_D32_SFLOAT;
   SplatRenderMode splat_render_mode_ = SplatRenderMode::TriangleList;
   ModelType model_type_ = ModelType::RayGS;
+  // Track model type changes to force pipeline state reset. Switching kernels
+  // (GS<->RayGS) can leave stale GPU state (e.g., projection output format
+  // mismatch) causing corrupted rendering until the camera moves.
+  ModelType prev_model_type_ = ModelType::RayGS;
   SplatPushConstants splat_push_constants_;
+
+  // Dynamic GPU visibility culling (Hyperscape cluster masks + centroids).
+  std::string cull_masks_path_;       // cluster_masks.bin (per-splat uint64)
+  std::string cull_centroids_path_;   // cluster_centroids.json (view positions)
+  std::vector<glm::vec3> cull_centroids_;
+  vk::Buffer cull_masks_buffer_;      // transposed: (num_views, words_per_mask) uint32
+  uint32_t cull_words_per_mask_ = 0;
+  bool cull_dynamic_ready_ = false;
 
   Camera camera_;
 
@@ -1737,7 +2183,8 @@ class Engine::Impl {
     vk::Buffer index;          // (N)
     vk::Buffer inverse_index;  // (N)
 
-    vk::Buffer instance;  // (N, 12)
+    vk::Buffer instance;        // (N, 12) for GS: 3x vec4 (ndc_pos, rot_scale, color)
+    vk::Buffer instance_raygs;  // (N, 14) for RayGS: 14 floats (T matrix, color, opacity)
   };
   SplatStorage splat_storage_;
   vk::Buffer sort_storage_;
@@ -1769,6 +2216,32 @@ class Engine::Impl {
   static constexpr uint32_t timestamp_count_ = 12;
   std::vector<VkQueryPool> timestamp_query_pools_;
 
+  // batch (headless) rendering state
+  bool batch_mode_ = false;
+  bool batch_raygs_ = true;
+
+  // Hyperscape compatibility: GPU-side logit opacity bias (PageUp/PageDown adjustable).
+  float opacity_bias_ = 0.0f;
+  bool opacity_bias_dirty_ = false;
+  // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
+  // Applied as: alpha_out = clamp(alpha * scale + bias, 0, 1).
+  float alpha_scale_ = 1.0f;
+  float alpha_bias_ = 0.0f;
+  // Persistent PLY source buffer for opacity-bias re-dispatch. The per-frame
+  // FrameInfo::ply_buffer is only held until end of the load frame; we need
+  // the source data alive for the lifetime of the scene to re-run parse_ply.
+  vk::Buffer persistent_ply_buffer_;
+  std::vector<std::array<float, 16>> batch_views_;
+  std::vector<std::array<float, 3>> batch_eyes_;
+  std::string batch_out_dir_ = ".";
+  std::string batch_prefix_ = "shot";
+  size_t batch_index_ = 0;
+  int batch_warmup_ = 0;
+  uint32_t batch_last_loaded_ = 0;
+  bool batch_armed_ = false;
+  vk::CpuBuffer screenshot_staging_;
+  VkDeviceSize screenshot_size_ = 0;
+
   uint64_t frame_counter_ = 0;
 };
 
@@ -1779,6 +2252,39 @@ Engine::~Engine() = default;
 void Engine::LoadSplats(const std::string& ply_filepath) { impl_->LoadSplats(ply_filepath); }
 
 void Engine::LoadSplatsAsync(const std::string& ply_filepath) { impl_->LoadSplatsAsync(ply_filepath); }
+
+void Engine::SetZUp(bool z_up) { impl_->SetZUp(z_up); }
+
+void Engine::SetKernelRayGS(bool raygs) { impl_->SetKernelRayGS(raygs); }
+
+void Engine::SetBatchViews(const std::vector<std::array<float, 16>>& views,
+                           const std::vector<std::array<float, 3>>& eyes) {
+  impl_->SetBatchViews(views, eyes);
+}
+
+void Engine::SetBatchOutput(const std::string& dir, const std::string& prefix) {
+  impl_->SetBatchOutput(dir, prefix);
+}
+
+void Engine::SetCullMasks(const std::string& masks_path, int view_index) {
+  impl_->SetCullMasks(masks_path, view_index);
+}
+
+void Engine::SetCullCentroids(const std::string& centroids_path) {
+  impl_->SetCullCentroids(centroids_path);
+}
+
+void Engine::SetDcOnly(bool dc_only) {
+  impl_->SetDcOnly(dc_only);
+}
+
+void Engine::SetOpacityBias(float bias) {
+  impl_->SetOpacityBias(bias);
+}
+
+void Engine::SetAlphaCorrection(float scale, float bias) {
+  impl_->SetAlphaCorrection(scale, bias);
+}
 
 void Engine::Run() { impl_->Run(); }
 

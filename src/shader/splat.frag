@@ -8,6 +8,6 @@ layout(location = 0) out vec4 out_color;
 void main() {
   float gaussian_alpha = exp(-0.5f * dot(position, position));
   float alpha = color.a * gaussian_alpha;
-  // premultiplied alpha
+  // premultiplied alpha, linear (no sRGB encode; see issue #xx)
   out_color = vec4(color.rgb * alpha, alpha);
 }
