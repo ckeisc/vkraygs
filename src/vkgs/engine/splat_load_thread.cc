@@ -42,7 +42,7 @@ bool LoadSpzAsPly(const std::string& path, std::vector<uint32_t>& ply_offsets, s
                   size_t* point_count, int* stride_bytes, const std::function<bool()>& cancelled,
                   const std::function<void(uint32_t)>& progress,
                   const std::string& cull_masks_path = "", int cull_view_index = -1,
-                  bool dc_only = false, const HoleFillParams& hole_fill = HoleFillParams()) {
+                  bool dc_only = false, const vkgs::HoleFillParams& hole_fill = vkgs::HoleFillParams()) {
   spz::GaussianCloud cloud = spz::loadSpz(path, spz::UnpackOptions());
 
   // Optional visibility-cluster culling (Hyperscape od_cluster_masks).
