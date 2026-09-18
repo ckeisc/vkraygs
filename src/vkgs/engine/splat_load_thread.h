@@ -9,6 +9,7 @@
 
 #include "vkgs/vulkan/context.h"
 #include "vkgs/vulkan/buffer.h"
+#include "vkgs/engine/hole_fill_params.h"
 
 namespace vkgs {
 
@@ -40,6 +41,9 @@ class SplatLoadThread {
 
   // Debug: ignore SH view-dependent terms, use DC color only.
   void SetDcOnly(bool dc_only);
+
+  // Hole-filling post-process on the decoded SPZ cloud (in-memory, before display).
+  void SetHoleFill(const HoleFillParams& params);
 
   Progress GetProgress();
 

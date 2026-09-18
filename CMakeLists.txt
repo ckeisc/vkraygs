@@ -64,6 +64,7 @@ endfunction()
 # vkgs
 add_library(vkgs SHARED
   src/vkgs/engine/engine.cc
+  src/vkgs/engine/splat_hole_fill.cc
   src/vkgs/engine/splat_load_thread.cc
   src/vkgs/scene/camera.cc
   src/vkgs/viewer/viewer.cc

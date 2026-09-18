@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "vkgs/engine/hole_fill_params.h"
+
 namespace vkgs {
 
 class Splats;
@@ -49,6 +51,10 @@ class Engine {
   // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
   // Applies alpha_out = clamp(alpha * scale + bias, 0, 1) GPU-side.
   void SetAlphaCorrection(float scale, float bias);
+
+  // Hole-filling post-process on the decoded SPZ cloud (in-memory, before display).
+  // See docs/hole-filling.md and HoleFillParams.
+  void SetHoleFill(const HoleFillParams& params);
 
   void Run();
 

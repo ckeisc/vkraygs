@@ -88,6 +88,22 @@ int main(int argc, char** argv) {
       .default_value(0.0f)
       .scan<'g', float>()
       .help("experimental alpha correction bias (see docs/hyperscape-opacity-trace.md)");
+  parser.add_argument("--inflate")
+      .default_value(1.0f)
+      .scan<'g', float>()
+      .help("hole-filling idea 1: multiply each Gaussian's 3D sigma by this factor (e.g. 1.3); 1.0 = off");
+  parser.add_argument("--densify")
+      .default_value(false)
+      .implicit_value(true)
+      .help("hole-filling idea 2: interpolate new Gaussians between neighbors across large gaps");
+  parser.add_argument("--densify-gap")
+      .default_value(3.0f)
+      .scan<'g', float>()
+      .help("hole-filling idea 2: insert midpoint splat when gap > this * (r_i + r_j)");
+  parser.add_argument("--opacity-gamma")
+      .default_value(1.0f)
+      .scan<'g', float>()
+      .help("hole-filling idea 3: ramp opacities up via o' = o^(1/gamma); e.g. 2.0; 1.0 = off");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -187,6 +203,19 @@ int main(int argc, char** argv) {
     if (alpha_scale != 1.0f || alpha_bias != 0.0f) {
       engine.SetAlphaCorrection(alpha_scale, alpha_bias);
       std::cout << "alpha correction: scale=" << alpha_scale << " bias=" << alpha_bias << std::endl;
+    }
+
+    vkgs::HoleFillParams hole_fill;
+    hole_fill.inflate = parser.get<float>("inflate");
+    hole_fill.densify = parser.get<bool>("densify");
+    hole_fill.densify_gap = parser.get<float>("densify-gap");
+    hole_fill.opacity_gamma = parser.get<float>("opacity-gamma");
+    if (hole_fill.enabled()) {
+      engine.SetHoleFill(hole_fill);
+      std::cout << "hole-fill: inflate=" << hole_fill.inflate
+                << " densify=" << (hole_fill.densify ? "on" : "off")
+                << " gap=" << hole_fill.densify_gap
+                << " opacity_gamma=" << hole_fill.opacity_gamma << std::endl;
     }
 
     if (parser.is_used("input")) {

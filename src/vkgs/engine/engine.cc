@@ -664,6 +664,10 @@ class Engine::Impl {
     splat_load_thread_.SetDcOnly(dc_only);
   }
 
+  void SetHoleFill(const HoleFillParams& params) {
+    splat_load_thread_.SetHoleFill(params);
+  }
+
   void SetOpacityBias(float bias) {
     opacity_bias_ = bias;
     opacity_bias_dirty_ = true;
@@ -2284,6 +2288,10 @@ void Engine::SetOpacityBias(float bias) {
 
 void Engine::SetAlphaCorrection(float scale, float bias) {
   impl_->SetAlphaCorrection(scale, bias);
+}
+
+void Engine::SetHoleFill(const HoleFillParams& params) {
+  impl_->SetHoleFill(params);
 }
 
 void Engine::Run() { impl_->Run(); }
