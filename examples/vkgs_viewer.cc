@@ -80,10 +80,14 @@ int main(int argc, char** argv) {
       .default_value(0.0f)
       .scan<'g', float>()
       .help("logit-space opacity boost for Hyperscape SPZ (e.g. 1.0); compensates for rasterizer vs ray-marcher accumulation");
-  parser.add_argument("--no-visibility-cull")
-      .default_value(false)
-      .implicit_value(true)
-      .help("disable Hyperscape visibility-cluster culling (for testing if culling causes holes)");
+  parser.add_argument("--alpha-scale")
+      .default_value(1.0f)
+      .scan<'g', float>()
+      .help("experimental alpha correction scale (see docs/hyperscape-opacity-trace.md); alpha_out = clamp(alpha * scale + bias, 0, 1)");
+  parser.add_argument("--alpha-bias")
+      .default_value(0.0f)
+      .scan<'g', float>()
+      .help("experimental alpha correction bias (see docs/hyperscape-opacity-trace.md)");
   try {
     parser.parse_args(argc, argv);
   } catch (const std::exception& err) {
@@ -178,10 +182,11 @@ int main(int argc, char** argv) {
       std::cout << "opacity bias: " << opacity_bias << " (logit space)" << std::endl;
     }
 
-    const bool no_visibility_cull = parser.get<bool>("no-visibility-cull");
-    if (no_visibility_cull) {
-      engine.SetDisableVisibilityCull(true);
-      std::cout << "visibility-cluster culling disabled" << std::endl;
+    const float alpha_scale = parser.get<float>("alpha-scale");
+    const float alpha_bias = parser.get<float>("alpha-bias");
+    if (alpha_scale != 1.0f || alpha_bias != 0.0f) {
+      engine.SetAlphaCorrection(alpha_scale, alpha_bias);
+      std::cout << "alpha correction: scale=" << alpha_scale << " bias=" << alpha_bias << std::endl;
     }
 
     if (parser.is_used("input")) {

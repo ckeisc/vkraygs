@@ -669,6 +669,13 @@ class Engine::Impl {
     opacity_bias_dirty_ = true;
   }
 
+  // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
+  void SetAlphaCorrection(float scale, float bias) {
+    alpha_scale_ = scale;
+    alpha_bias_ = bias;
+    opacity_bias_dirty_ = true;  // reuses the parse_ply re-dispatch path
+  }
+
   // Parse Hyperscape cluster_centroids.json: {"splat_count": N, "views": [[x,y,z], ...]}.
   static bool LoadCullCentroids(const std::string& path, std::vector<glm::vec3>* out) {
     std::ifstream f(path);
@@ -1510,9 +1517,13 @@ class Engine::Impl {
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 3, 1, &descriptor, 0,
                                 NULL);
 
-        // Push opacity bias (Hyperscape compatibility, PageUp/PageDown adjustable).
-        vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(float), &opacity_bias_);
+        // Push opacity bias + alpha correction (Hyperscape compatibility).
+        // Layout must match ParsePushConstants in parse_ply.comp.
+        {
+          float push[3] = {opacity_bias_, alpha_scale_, alpha_bias_};
+          vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                             0, sizeof(push), push);
+        }
 
         constexpr int local_size = 256;
         vkCmdDispatch(cb, (loaded_point_count_ + local_size - 1) / local_size, 1, 1);
@@ -1549,8 +1560,11 @@ class Engine::Impl {
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout_, 3, 1, &descriptor, 0,
                                 NULL);
 
-        vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(float), &opacity_bias_);
+        {
+          float push[3] = {opacity_bias_, alpha_scale_, alpha_bias_};
+          vkCmdPushConstants(cb, compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                             0, sizeof(push), push);
+        }
 
         constexpr int local_size = 256;
         vkCmdDispatch(cb, (loaded_point_count_ + local_size - 1) / local_size, 1, 1);
@@ -2209,6 +2223,10 @@ class Engine::Impl {
   // Hyperscape compatibility: GPU-side logit opacity bias (PageUp/PageDown adjustable).
   float opacity_bias_ = 0.0f;
   bool opacity_bias_dirty_ = false;
+  // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
+  // Applied as: alpha_out = clamp(alpha * scale + bias, 0, 1).
+  float alpha_scale_ = 1.0f;
+  float alpha_bias_ = 0.0f;
   // Persistent PLY source buffer for opacity-bias re-dispatch. The per-frame
   // FrameInfo::ply_buffer is only held until end of the load frame; we need
   // the source data alive for the lifetime of the scene to re-run parse_ply.
@@ -2262,6 +2280,10 @@ void Engine::SetDcOnly(bool dc_only) {
 
 void Engine::SetOpacityBias(float bias) {
   impl_->SetOpacityBias(bias);
+}
+
+void Engine::SetAlphaCorrection(float scale, float bias) {
+  impl_->SetAlphaCorrection(scale, bias);
 }
 
 void Engine::Run() { impl_->Run(); }

@@ -46,9 +46,9 @@ class Engine {
   // Real-time adjustable via PageUp/PageDown. Initial value from --opacity-bias flag.
   void SetOpacityBias(float bias);
 
-  // Disable Hyperscape visibility-cluster culling (for testing if culling causes holes).
-  // From --no-visibility-cull flag.
-  void SetDisableVisibilityCull(bool disable);
+  // Experimental alpha correction (see docs/hyperscape-opacity-trace.md).
+  // Applies alpha_out = clamp(alpha * scale + bias, 0, 1) GPU-side.
+  void SetAlphaCorrection(float scale, float bias);
 
   void Run();
 
